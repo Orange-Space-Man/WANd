@@ -1,0 +1,7 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="WANd/WANd.vcxproj" Id="ec18336f-6e45-46d8-bbd2-183dbfe573df" />
+  <Project Path="winmm/winmm.vcxproj" Id="f64df161-76c4-4dca-b92d-1e78605826fc" />
+</Solution>

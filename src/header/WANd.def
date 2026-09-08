@@ -1,0 +1,9 @@
+LIBRARY WANd
+
+EXPORTS
+    WANdStart
+    WANdHost
+    WANdJoin
+    WANdStop
+    WANdStatus
+    WANdLuaState

@@ -377,10 +377,26 @@ namespace {
         }
         strncpy_s(image, imageSize, value, _TRUNCATE);
         lua51::setTop(state, top);
-
+		
         // Ability sprite definitions provide their own held-image pivot.
         // Item sprite offsets and the item's world pose are not this pose.
+		
         offsetX = offsetY = 0;
+        const std::size_t imageLength = std::strlen(image);
+        if (imageLength >= 4 && std::strcmp(image + imageLength - 4, ".xml") == 0) return true;
+        const int itemSprite = getTaggedComponent(state, wand, "SpriteComponent", "item");
+        if (itemSprite != 0) {
+            float* outputs[] = {&offsetX, &offsetY};
+            const char* names[] = {"offset_x", "offset_y"};
+            for (int i = 0; i < 2; ++i) {
+                lua51::getGlobal(state, "ComponentGetValue2");
+                lua51::pushNumber(state, itemSprite);
+                lua51::pushString(state, names[i]);
+                if (lua51::pcall(state, 2, 1, 0) == 0 && lua51::type(state, -1) == lua51::typeNumber)
+                    *outputs[i] = static_cast<float>(lua51::toNumber(state, -1));
+                lua51::setTop(state, top);
+            }
+        }
         return true;
     }
 }

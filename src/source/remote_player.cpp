@@ -10,6 +10,10 @@
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
+#include <string>
+#include <regex>
+#include <filesystem>
+#include "wand_image_grip.h"
 
 namespace {
     constexpr DWORD p_updateTime = 16;
@@ -572,7 +576,63 @@ namespace {
         return true;
     }
 
+    std::string gripSprite(lua51::lua_State* state, const char* source, float handX, float handY) {
+        const std::string path(source);
+        const bool isXml = path.size() >= 4 && path.substr(path.size() - 4) == ".xml";
+        const int top = lua51::getTop(state);
+        std::string xml;
+        if (isXml) {
+        if (!beginCall(state, "ModTextFileGetContent", top)) return path;
+        lua51::pushString(state, source);
+        if (lua51::pcall(state, 1, 1, 0) != 0 || lua51::type(state, -1) != lua51::typeString) {
+            lua51::setTop(state, top);
+            return path;
+        }
+        xml = lua51::toString(state, -1);
+        lua51::setTop(state, top);
+        }
+        auto attribute = [](const std::string& text, const char* name) {
+            std::smatch match;
+            return std::regex_search(text, match, std::regex(std::string("\\b") + name + "\\s*=\\s*[\"']([^\"']*)[\"']")) ? match[1].str() : std::string{};
+        };
+        std::smatch rootMatch;
+        if (isXml && !std::regex_search(xml, rootMatch, std::regex("<Sprite\\b[^>]*>"))) return path;
+        std::string png = isXml ? attribute(rootMatch.str(), "filename") : path;
+        std::string frame;
+        if (isXml) {
+            const std::regex frames("<RectAnimation\\b[^>]*>");
+            for (std::sregex_iterator it(xml.begin(), xml.end(), frames), end; it != end; ++it) {
+                if (frame.empty()) frame = it->str();
+                if (attribute(it->str(), "name") == "default") { frame = it->str(); break; }
+            }
+        }
+        auto number = [&](const char* name) { const auto value = attribute(frame, name); return value.empty() ? 0 : std::atoi(value.c_str()); };
+        int x = number("pos_x"), y = number("pos_y"), width = number("frame_width"), height = number("frame_height");
+        wand_image::Grip grip{};
+        if (!wand_image::decode(png, x, y, width, height, grip)) {
+            monitor::write("error", "Wand image grip decoding failed");
+            return {};
+        }
+        xml = "<Sprite filename=\"" + png + "\" default_animation=\"default\"><RectAnimation name=\"default\" pos_x=\"" + std::to_string(x)
+            + "\" pos_y=\"" + std::to_string(y) + "\" frame_width=\"" + std::to_string(width) + "\" frame_height=\"" + std::to_string(height)
+            + "\" frame_count=\"1\" frame_wait=\"1\" loop=\"1\" has_offset=\"1\" offset_x=\"" + std::to_string(grip.x - handX)
+            + "\" offset_y=\"" + std::to_string(grip.y - handY) + "\" /></Sprite>";
+        static std::uint64_t spriteGeneration = 0;
+        const std::string generated = "mods/WANd/generated/grip_" + std::to_string(GetCurrentProcessId()) + "_" + std::to_string(GetTickCount64()) + "_" + std::to_string(++spriteGeneration) + ".xml";
+        std::error_code error;
+        std::filesystem::create_directories("mods/WANd/generated", error);
+        if (error) { monitor::write("error", "Cannot create wand sprite directory"); return {}; }
+        std::ofstream output(generated, std::ios::binary);
+        output.write(xml.data(), xml.size());
+        output.close();
+        if (!output) { monitor::write("error", "Cannot write calculated wand sprite"); return {}; }
+        monitor::write("log", generated.c_str());
+        return generated;
+    }
+
     void createWand(lua51::lua_State* state, const network::PlayerState& player) {
+        static float previousHandX = 0, previousHandY = 0;
+        static float previousOffsetX = 0, previousOffsetY = 0;
         // This visual replica has no equipped inventory item. Its arm must
         // follow replicated visibility, not the native `with_item` toggle.
         const int armSprite = getComponent(state, p_arm, "SpriteComponent", "wand_remote_arm");
@@ -581,7 +641,23 @@ namespace {
             killWand(state);
             return;
         }
-        if (p_wandEntity != 0 && std::strcmp(p_wandSprite, player.wandSprite) == 0) {
+        float handX = 0, handY = 0;
+        const int hotspotTop = lua51::getTop(state);
+        if (!beginCall(state, "EntityGetHotspot", hotspotTop)) return;
+        lua51::pushNumber(state, p_arm);
+        lua51::pushString(state, "hand");
+        lua51::pushBoolean(state, false); // sprite-local coordinates, before flip/rotation
+        lua51::pushBoolean(state, true);
+        if (lua51::pcall(state, 4, 2, 0) != 0 || lua51::type(state, -2) != lua51::typeNumber || lua51::type(state, -1) != lua51::typeNumber) {
+            lua51::setTop(state, hotspotTop);
+            return;
+        }
+        handX = static_cast<float>(lua51::toNumber(state, -2));
+        handY = static_cast<float>(lua51::toNumber(state, -1));
+        lua51::setTop(state, hotspotTop);
+        if (p_wandEntity != 0 && std::strcmp(p_wandSprite, player.wandSprite) == 0
+            && previousHandX == handX && previousHandY == handY
+            && previousOffsetX == player.wandOffsetX && previousOffsetY == player.wandOffsetY) {
             setComponentEnabled(state, p_wandEntity, p_wandSpriteComponent, true);
             return;
         }
@@ -602,6 +678,9 @@ namespace {
             return;
         }
 
+        const std::string imagePath = gripSprite(state, player.wandSprite, handX, handY);
+        if (imagePath.empty()) { killWand(state); return; }
+        const bool rawImage = imagePath.size() < 4 || imagePath.substr(imagePath.size() - 4) != ".xml";
         if (!beginCall(state, "EntityAddComponent2", top)) {
             killWand(state);
             return;
@@ -611,13 +690,13 @@ namespace {
         lua51::createTable(state, 0, 6);
         lua51::pushString(state, "wand_remote_sprite");
         lua51::setField(state, -2, "_tags");
-        lua51::pushString(state, player.wandSprite);
+        lua51::pushString(state, imagePath.c_str());
         lua51::setField(state, -2, "image_file");
         lua51::pushString(state, "default");
         lua51::setField(state, -2, "rect_animation");
-        lua51::pushNumber(state, 0);
+        lua51::pushNumber(state, rawImage ? player.wandOffsetX - handX : 0);
         lua51::setField(state, -2, "offset_x");
-        lua51::pushNumber(state, 0);
+        lua51::pushNumber(state, rawImage ? player.wandOffsetY - handY : 0);
         lua51::setField(state, -2, "offset_y");
         lua51::pushNumber(state, 0.595);
         lua51::setField(state, -2, "z_index");
@@ -667,6 +746,10 @@ namespace {
         setComponentEnabled(state, p_wandEntity, p_wandSpriteComponent, true);
 
         strncpy_s(p_wandSprite, sizeof(p_wandSprite), player.wandSprite, _TRUNCATE);
+        previousHandX = handX;
+        previousHandY = handY;
+        previousOffsetX = player.wandOffsetX;
+        previousOffsetY = player.wandOffsetY;
         monitor::write("log", "Wand visual: ability sprite, shared shoulder and arm pose");
         p_loggedHandHotspot = true;
     }

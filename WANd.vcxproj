@@ -99,6 +99,7 @@
     <ClInclude Include="noita.h" />
     <ClInclude Include="player_sync.h" />
     <ClInclude Include="remote_player.h" />
+    <ClInclude Include="wand_image_grip.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="control.cpp" />

@@ -5,16 +5,46 @@
 
 #include <windows.h>
 
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
+#include <cstdint>
+#include <cstring>
+
 namespace {
     constexpr DWORD p_updateTime = 16;
-    void* volatile p_gameState = nullptr;
+    constexpr DWORD p_snapshotTime = 50;
+    constexpr DWORD p_maxExtrapolation = 100;
     int p_entity = 0;
     int p_sprite = 0;
+    int p_arm = 0;
+    int p_wandEntity = 0;
+    int p_wandSpriteComponent = 0;
+    int p_controls = 0;
+    int p_inventory = 0;
+    int p_quickInventory = 0;
+    char p_wandSprite[256]{};
     float p_x = 0.0f;
     float p_y = 0.0f;
-    bool p_facingLeft = false;
-    bool p_hasFacing = false;
+    float p_fromX = 0.0f;
+    float p_fromY = 0.0f;
+    float p_toX = 0.0f;
+    float p_toY = 0.0f;
+    float p_velocityX = 0.0f;
+    float p_velocityY = 0.0f;
+    float p_aimX = 1.0f;
+    float p_aimY = 0.0f;
+    float p_fromAimX = 1.0f;
+    float p_fromAimY = 0.0f;
+    float p_toAimX = 1.0f;
+    float p_toAimY = 0.0f;
+    char p_animation[32]{};
+    std::uint32_t p_sequence = 0;
+    DWORD p_snapshotStart = 0;
+    DWORD p_snapshotDuration = p_snapshotTime;
+    DWORD p_lastPacket = 0;
     DWORD p_lastUpdate = 0;
+    bool p_loggedHandHotspot = false;
 
     bool beginCall(lua51::lua_State* state, const char* name, int top) {
         lua51::getGlobal(state, name);
@@ -25,21 +55,196 @@ namespace {
         return false;
     }
 
-    void killRemote(lua51::lua_State* state) {
-        if (p_entity == 0) {
+    void killEntity(lua51::lua_State* state, int entity) {
+        if (entity == 0) {
             return;
         }
 
         const int top = lua51::getTop(state);
         if (beginCall(state, "EntityKill", top)) {
-            lua51::pushNumber(state, p_entity);
+            lua51::pushNumber(state, entity);
             lua51::pcall(state, 1, 0, 0);
         }
         lua51::setTop(state, top);
+    }
+
+    void killRemote(lua51::lua_State* state) {
+        if (p_entity == 0 && p_arm == 0 && p_wandEntity == 0) {
+            return;
+        }
+
+        killEntity(state, p_wandEntity);
+        killEntity(state, p_arm);
+        killEntity(state, p_entity);
         p_entity = 0;
         p_sprite = 0;
-        p_hasFacing = false;
+        p_arm = 0;
+        p_wandEntity = 0;
+        p_wandSpriteComponent = 0;
+        p_controls = 0;
+        p_inventory = 0;
+        p_quickInventory = 0;
+        p_wandSprite[0] = '\0';
+        p_animation[0] = '\0';
+        p_loggedHandHotspot = false;
+        p_sequence = 0;
         monitor::write("log", "Remote player removed");
+    }
+
+    int getComponent(lua51::lua_State* state, int entity, const char* type, const char* tag = nullptr) {
+        const int top = lua51::getTop(state);
+        if (!beginCall(state, "EntityGetFirstComponentIncludingDisabled", top)) {
+            return 0;
+        }
+        lua51::pushNumber(state, entity);
+        lua51::pushString(state, type);
+        int arguments = 2;
+        if (tag != nullptr) {
+            lua51::pushString(state, tag);
+            arguments = 3;
+        }
+        if (lua51::pcall(state, arguments, 1, 0) != 0 || lua51::type(state, -1) != lua51::typeNumber) {
+            lua51::setTop(state, top);
+            return 0;
+        }
+        const int component = static_cast<int>(lua51::toNumber(state, -1));
+        lua51::setTop(state, top);
+        return component;
+    }
+
+    int getChild(lua51::lua_State* state, int entity, const char* tag) {
+        const int top = lua51::getTop(state);
+        if (!beginCall(state, "EntityGetAllChildren", top)) {
+            return 0;
+        }
+        lua51::pushNumber(state, entity);
+        if (lua51::pcall(state, 1, 1, 0) != 0 || lua51::type(state, -1) != lua51::typeTable) {
+            lua51::setTop(state, top);
+            return 0;
+        }
+
+        int child = 0;
+        for (int index = 1; index <= 64; ++index) {
+            lua51::rawGetIndex(state, -1, index);
+            if (lua51::type(state, -1) != lua51::typeNumber) {
+                lua51::setTop(state, top + 1);
+                break;
+            }
+            const int candidate = static_cast<int>(lua51::toNumber(state, -1));
+            lua51::setTop(state, top + 1);
+            if (beginCall(state, "EntityHasTag", top + 1)) {
+                lua51::pushNumber(state, candidate);
+                lua51::pushString(state, tag);
+                if (lua51::pcall(state, 2, 1, 0) == 0
+                    && lua51::type(state, -1) == lua51::typeBoolean
+                    && lua51::toBoolean(state, -1)) {
+                    child = candidate;
+                    lua51::setTop(state, top + 1);
+                    break;
+                }
+            }
+            lua51::setTop(state, top + 1);
+        }
+        lua51::setTop(state, top);
+        return child;
+    }
+
+    void removeTag(lua51::lua_State* state, int entity, const char* tag) {
+        const int top = lua51::getTop(state);
+        if (beginCall(state, "EntityRemoveTag", top)) {
+            lua51::pushNumber(state, entity);
+            lua51::pushString(state, tag);
+            lua51::pcall(state, 2, 0, 0);
+        }
+        lua51::setTop(state, top);
+    }
+
+    void disableComponents(lua51::lua_State* state, int entity, const char* type) {
+        const int top = lua51::getTop(state);
+        if (!beginCall(state, "EntityGetComponentIncludingDisabled", top)) {
+            return;
+        }
+        lua51::pushNumber(state, entity);
+        lua51::pushString(state, type);
+        if (lua51::pcall(state, 2, 1, 0) != 0 || lua51::type(state, -1) != lua51::typeTable) {
+            lua51::setTop(state, top);
+            return;
+        }
+
+        for (int index = 1; index <= 64; ++index) {
+            lua51::rawGetIndex(state, -1, index);
+            if (lua51::type(state, -1) != lua51::typeNumber) {
+                lua51::setTop(state, top + 1);
+                break;
+            }
+            const int component = static_cast<int>(lua51::toNumber(state, -1));
+            lua51::setTop(state, top + 1);
+            if (beginCall(state, "EntitySetComponentIsEnabled", top + 1)) {
+                lua51::pushNumber(state, entity);
+                lua51::pushNumber(state, component);
+                lua51::pushBoolean(state, false);
+                lua51::pcall(state, 3, 0, 0);
+            }
+            lua51::setTop(state, top + 1);
+        }
+        lua51::setTop(state, top);
+    }
+
+    void setNumber(lua51::lua_State* state, int component, const char* name, double value) {
+        if (component == 0) {
+            return;
+        }
+        const int top = lua51::getTop(state);
+        if (beginCall(state, "ComponentSetValue2", top)) {
+            lua51::pushNumber(state, component);
+            lua51::pushString(state, name);
+            lua51::pushNumber(state, value);
+            lua51::pcall(state, 3, 0, 0);
+        }
+        lua51::setTop(state, top);
+    }
+
+    void setBoolean(lua51::lua_State* state, int component, const char* name, bool value) {
+        if (component == 0) {
+            return;
+        }
+        const int top = lua51::getTop(state);
+        if (beginCall(state, "ComponentSetValue2", top)) {
+            lua51::pushNumber(state, component);
+            lua51::pushString(state, name);
+            lua51::pushBoolean(state, value);
+            lua51::pcall(state, 3, 0, 0);
+        }
+        lua51::setTop(state, top);
+    }
+
+    void setVector(lua51::lua_State* state, int component, const char* name, double x, double y) {
+        if (component == 0) {
+            return;
+        }
+        const int top = lua51::getTop(state);
+        if (beginCall(state, "ComponentSetValue2", top)) {
+            lua51::pushNumber(state, component);
+            lua51::pushString(state, name);
+            lua51::pushNumber(state, x);
+            lua51::pushNumber(state, y);
+            lua51::pcall(state, 4, 0, 0);
+        }
+        lua51::setTop(state, top);
+    }
+
+    void setComponentEnabled(lua51::lua_State* state, int entity, int component, bool enabled) {
+        if (entity == 0 || component == 0) {
+            return;
+        }
+        const int top = lua51::getTop(state);
+        if (beginCall(state, "EntitySetComponentIsEnabled", top)) {
+            lua51::pushNumber(state, entity);
+            lua51::pushNumber(state, component);
+            lua51::pushBoolean(state, enabled);
+            lua51::pcall(state, 3, 0, 0);
+        }
+        lua51::setTop(state, top);
     }
 
     int createEntity(lua51::lua_State* state, const network::PlayerState& player) {
@@ -65,71 +270,611 @@ namespace {
         }
         lua51::setTop(state, top);
 
-        if (!beginCall(state, "EntityAddComponent2", top)) {
-            return entity;
-        }
-        lua51::pushNumber(state, entity);
-        lua51::pushString(state, "SpriteComponent");
-        lua51::createTable(state, 0, 9);
-        lua51::pushString(state, "wand_remote_player");
-        lua51::setField(state, -2, "_tags");
-        lua51::pushString(state, "data/enemies_gfx/player.xml");
-        lua51::setField(state, -2, "image_file");
-        lua51::pushString(state, "stand");
-        lua51::setField(state, -2, "rect_animation");
-        lua51::pushNumber(state, 6.0);
-        lua51::setField(state, -2, "offset_x");
-        lua51::pushNumber(state, 14.0);
-        lua51::setField(state, -2, "offset_y");
-        lua51::pushNumber(state, 0.9);
-        lua51::setField(state, -2, "z_index");
-        lua51::pushBoolean(state, true);
-        lua51::setField(state, -2, "has_special_scale");
-        float scaleX = 1.0f;
-        if (player.facingLeft) {
-            scaleX = -1.0f;
-        }
-        lua51::pushNumber(state, scaleX);
-        lua51::setField(state, -2, "special_scale_x");
-        lua51::pushNumber(state, 1.0);
-        lua51::setField(state, -2, "special_scale_y");
-        if (lua51::pcall(state, 3, 1, 0) == 0 && lua51::type(state, -1) == lua51::typeNumber) {
-            p_sprite = static_cast<int>(lua51::toNumber(state, -1));
+        if (beginCall(state, "EntityAddComponent2", top)) {
+            lua51::pushNumber(state, entity);
+            lua51::pushString(state, "PlatformShooterPlayerComponent");
+            lua51::createTable(state, 0, 3);
+            lua51::pushBoolean(state, false);
+            lua51::setField(state, -2, "center_camera_on_this_entity");
+            lua51::pushBoolean(state, false);
+            lua51::setField(state, -2, "move_camera_with_aim");
+            lua51::pushNumber(state, 60.0);
+            lua51::setField(state, -2, "aiming_reticle_distance_from_character");
+            lua51::pcall(state, 3, 0, 0);
         }
         lua51::setTop(state, top);
+
+        if (beginCall(state, "EntityAddComponent2", top)) {
+            lua51::pushNumber(state, entity);
+            lua51::pushString(state, "CharacterDataComponent");
+            lua51::createTable(state, 0, 1);
+            lua51::pushNumber(state, 0.0);
+            lua51::setField(state, -2, "gravity");
+            lua51::pcall(state, 3, 0, 0);
+        }
+        lua51::setTop(state, top);
+
+        if (beginCall(state, "EntityAddComponent2", top)) {
+            lua51::pushNumber(state, entity);
+            lua51::pushString(state, "CharacterPlatformingComponent");
+            lua51::createTable(state, 0, 2);
+            lua51::pushBoolean(state, true);
+            lua51::setField(state, -2, "mouse_look");
+            lua51::pushBoolean(state, true);
+            lua51::setField(state, -2, "keyboard_look");
+            lua51::pcall(state, 3, 0, 0);
+        }
+        lua51::setTop(state, top);
+
+        if (beginCall(state, "EntityAddComponent2", top)) {
+            lua51::pushNumber(state, entity);
+            lua51::pushString(state, "ControlsComponent");
+            lua51::createTable(state, 0, 1);
+            lua51::pushBoolean(state, false);
+            lua51::setField(state, -2, "enabled");
+            if (lua51::pcall(state, 3, 1, 0) == 0 && lua51::type(state, -1) == lua51::typeNumber) {
+                p_controls = static_cast<int>(lua51::toNumber(state, -1));
+            }
+        }
+        lua51::setTop(state, top);
+
+        if (beginCall(state, "EntityAddComponent2", top)) {
+            lua51::pushNumber(state, entity);
+            lua51::pushString(state, "Inventory2Component");
+            lua51::createTable(state, 0, 2);
+            lua51::pushNumber(state, 10.0);
+            lua51::setField(state, -2, "quick_inventory_slots");
+            lua51::pushNumber(state, 16.0);
+            lua51::setField(state, -2, "full_inventory_slots_x");
+            if (lua51::pcall(state, 3, 1, 0) == 0 && lua51::type(state, -1) == lua51::typeNumber) {
+                p_inventory = static_cast<int>(lua51::toNumber(state, -1));
+            }
+        }
+        lua51::setTop(state, top);
+
+        if (beginCall(state, "EntityAddComponent2", top)) {
+            lua51::pushNumber(state, entity);
+            lua51::pushString(state, "GunComponent");
+            lua51::createTable(state, 0, 0);
+            lua51::pcall(state, 3, 0, 0);
+        }
+        lua51::setTop(state, top);
+
+        if (beginCall(state, "EntityAddComponent2", top)) {
+            lua51::pushNumber(state, entity);
+            lua51::pushString(state, "SpriteComponent");
+            lua51::createTable(state, 0, 6);
+            lua51::pushString(state, "character");
+            lua51::setField(state, -2, "_tags");
+            lua51::pushString(state, "data/enemies_gfx/player.xml");
+            lua51::setField(state, -2, "image_file");
+            lua51::pushString(state, "stand");
+            lua51::setField(state, -2, "rect_animation");
+            lua51::pushNumber(state, 6.0);
+            lua51::setField(state, -2, "offset_x");
+            lua51::pushNumber(state, 14.0);
+            lua51::setField(state, -2, "offset_y");
+            lua51::pushNumber(state, 0.6);
+            lua51::setField(state, -2, "z_index");
+            if (lua51::pcall(state, 3, 1, 0) == 0 && lua51::type(state, -1) == lua51::typeNumber) {
+                p_sprite = static_cast<int>(lua51::toNumber(state, -1));
+            }
+        }
+        lua51::setTop(state, top);
+
+        if (beginCall(state, "EntityAddComponent2", top)) {
+            lua51::pushNumber(state, entity);
+            lua51::pushString(state, "HotspotComponent");
+            lua51::createTable(state, 0, 3);
+            lua51::pushString(state, "hand");
+            lua51::setField(state, -2, "_tags");
+            lua51::pushString(state, "hand");
+            lua51::setField(state, -2, "sprite_hotspot_name");
+            lua51::pushBoolean(state, true);
+            lua51::setField(state, -2, "transform_with_scale");
+            lua51::pcall(state, 3, 0, 0);
+        }
+        lua51::setTop(state, top);
+
+        if (beginCall(state, "EntityAddComponent2", top)) {
+            lua51::pushNumber(state, entity);
+            lua51::pushString(state, "HotspotComponent");
+            lua51::createTable(state, 0, 3);
+            lua51::pushString(state, "right_arm_root");
+            lua51::setField(state, -2, "_tags");
+            lua51::pushString(state, "right_arm_start");
+            lua51::setField(state, -2, "sprite_hotspot_name");
+            lua51::pushBoolean(state, true);
+            lua51::setField(state, -2, "transform_with_scale");
+            lua51::pcall(state, 3, 0, 0);
+        }
+        lua51::setTop(state, top);
+
+        if (!beginCall(state, "EntityCreateNew", top)) {
+            killEntity(state, entity);
+            return 0;
+        }
+        lua51::pushString(state, "arm_r");
+        if (lua51::pcall(state, 1, 1, 0) == 0 && lua51::type(state, -1) == lua51::typeNumber) {
+            p_arm = static_cast<int>(lua51::toNumber(state, -1));
+        }
+        lua51::setTop(state, top);
+
+        if (beginCall(state, "EntityAddTag", top)) {
+            lua51::pushNumber(state, p_arm);
+            lua51::pushString(state, "player_arm_r");
+            lua51::pcall(state, 2, 0, 0);
+        }
+        lua51::setTop(state, top);
+
+        if (beginCall(state, "EntityAddComponent2", top)) {
+            lua51::pushNumber(state, p_arm);
+            lua51::pushString(state, "SpriteComponent");
+            lua51::createTable(state, 0, 4);
+            lua51::pushString(state, "with_item");
+            lua51::setField(state, -2, "_tags");
+            lua51::pushString(state, "data/enemies_gfx/player_arm.xml");
+            lua51::setField(state, -2, "image_file");
+            lua51::pushString(state, "default");
+            lua51::setField(state, -2, "rect_animation");
+            lua51::pushNumber(state, 0.59);
+            lua51::setField(state, -2, "z_index");
+            lua51::pcall(state, 3, 0, 0);
+        }
+        lua51::setTop(state, top);
+
+        if (beginCall(state, "EntityAddComponent2", top)) {
+            lua51::pushNumber(state, p_arm);
+            lua51::pushString(state, "InheritTransformComponent");
+            lua51::createTable(state, 0, 2);
+            lua51::pushString(state, "right_arm_root");
+            lua51::setField(state, -2, "parent_hotspot_tag");
+            lua51::pushBoolean(state, true);
+            lua51::setField(state, -2, "only_position");
+            lua51::pcall(state, 3, 0, 0);
+        }
+        lua51::setTop(state, top);
+
+        if (beginCall(state, "EntityAddComponent2", top)) {
+            lua51::pushNumber(state, p_arm);
+            lua51::pushString(state, "HotspotComponent");
+            lua51::createTable(state, 0, 3);
+            lua51::pushString(state, "hand");
+            lua51::setField(state, -2, "_tags");
+            lua51::pushString(state, "hand");
+            lua51::setField(state, -2, "sprite_hotspot_name");
+            lua51::pushBoolean(state, true);
+            lua51::setField(state, -2, "transform_with_scale");
+            lua51::pcall(state, 3, 0, 0);
+        }
+        lua51::setTop(state, top);
+
+        if (beginCall(state, "EntityAddChild", top)) {
+            lua51::pushNumber(state, entity);
+            lua51::pushNumber(state, p_arm);
+            lua51::pcall(state, 2, 0, 0);
+        }
+        lua51::setTop(state, top);
+
+        if (beginCall(state, "EntityCreateNew", top)) {
+            lua51::pushString(state, "inventory_quick");
+            if (lua51::pcall(state, 1, 1, 0) == 0 && lua51::type(state, -1) == lua51::typeNumber) {
+                p_quickInventory = static_cast<int>(lua51::toNumber(state, -1));
+            }
+        }
+        lua51::setTop(state, top);
+        if (p_quickInventory != 0 && beginCall(state, "EntityAddChild", top)) {
+            lua51::pushNumber(state, entity);
+            lua51::pushNumber(state, p_quickInventory);
+            lua51::pcall(state, 2, 0, 0);
+        }
+        lua51::setTop(state, top);
+
+        if (p_sprite == 0 || p_controls == 0 || p_inventory == 0 || p_arm == 0 || p_quickInventory == 0) {
+            monitor::write("log", "Remote player hierarchy incomplete");
+            killEntity(state, entity);
+            p_sprite = 0;
+            p_controls = 0;
+            p_inventory = 0;
+            p_arm = 0;
+            p_quickInventory = 0;
+            return 0;
+        }
+
         return entity;
     }
 
-    void setTransform(lua51::lua_State* state, int entity, float x, float y) {
+    int createDefinedEntity(lua51::lua_State* state, const network::PlayerState& player) {
+        static const char* definition = R"xml(<Entity name="WANd remote player" tags="wand_remote_player">
+  <StreamingKeepAliveComponent />
+  <SpriteComponent _tags="character" image_file="data/enemies_gfx/player.xml" rect_animation="stand" offset_x="6" offset_y="14" z_index="0.6" />
+  <HotspotComponent _tags="hand" sprite_hotspot_name="hand" transform_with_scale="1" />
+  <HotspotComponent _tags="right_arm_root" sprite_hotspot_name="right_arm_start" transform_with_scale="1" />
+  <Entity name="arm_r" tags="player_arm_r">
+    <SpriteComponent _tags="wand_remote_arm" image_file="data/enemies_gfx/player_arm.xml" rect_animation="default" z_index="0.59" />
+    <InheritTransformComponent parent_hotspot_tag="right_arm_root" only_position="1" />
+    <HotspotComponent _tags="hand" sprite_hotspot_name="hand" transform_with_scale="1" />
+  </Entity>
+  <Entity name="inventory_quick" tags="wand_remote_inventory" />
+</Entity>)xml";
+        const int top = lua51::getTop(state);
+        if (!beginCall(state, "ModTextFileSetContent", top)) {
+            return 0;
+        }
+        lua51::pushString(state, "mods/WANd/generated/remote_player.xml");
+        lua51::pushString(state, definition);
+        if (lua51::pcall(state, 2, 0, 0) != 0) {
+            lua51::setTop(state, top);
+            return 0;
+        }
+        lua51::setTop(state, top);
+
+        if (!beginCall(state, "EntityLoad", top)) {
+            return 0;
+        }
+        lua51::pushString(state, "mods/WANd/generated/remote_player.xml");
+        lua51::pushNumber(state, player.x);
+        lua51::pushNumber(state, player.y);
+        if (lua51::pcall(state, 3, 1, 0) != 0 || lua51::type(state, -1) != lua51::typeNumber) {
+            lua51::setTop(state, top);
+            return 0;
+        }
+        const int entity = static_cast<int>(lua51::toNumber(state, -1));
+        lua51::setTop(state, top);
+        if (entity == 0) {
+            return 0;
+        }
+
+        p_sprite = getComponent(state, entity, "SpriteComponent", "character");
+        p_controls = getComponent(state, entity, "ControlsComponent");
+        p_inventory = getComponent(state, entity, "Inventory2Component");
+        p_arm = getChild(state, entity, "player_arm_r");
+        p_quickInventory = getChild(state, entity, "wand_remote_inventory");
+        if (p_sprite == 0 || p_arm == 0 || p_quickInventory == 0) {
+            monitor::write("log", "Remote XML hierarchy incomplete");
+            killEntity(state, entity);
+            p_sprite = 0;
+            p_controls = 0;
+            p_inventory = 0;
+            p_arm = 0;
+            p_quickInventory = 0;
+            return 0;
+        }
+        return entity;
+    }
+
+    void killWand(lua51::lua_State* state) {
+        if (p_wandEntity == 0) {
+            return;
+        }
+        killEntity(state, p_wandEntity);
+        p_wandEntity = 0;
+        p_wandSpriteComponent = 0;
+        p_wandSprite[0] = '\0';
+        p_loggedHandHotspot = false;
+    }
+
+    bool getWorldHotspot(lua51::lua_State* state, int entity, const char* tag, float& x, float& y) {
+        const int top = lua51::getTop(state);
+        if (!beginCall(state, "EntityGetHotspot", top)) {
+            return false;
+        }
+        lua51::pushNumber(state, entity);
+        lua51::pushString(state, tag);
+        lua51::pushBoolean(state, true);
+        if (lua51::pcall(state, 3, 2, 0) != 0 || lua51::type(state, -2) != lua51::typeNumber || lua51::type(state, -1) != lua51::typeNumber) {
+            lua51::setTop(state, top);
+            return false;
+        }
+        x = static_cast<float>(lua51::toNumber(state, -2));
+        y = static_cast<float>(lua51::toNumber(state, -1));
+        lua51::setTop(state, top);
+        return true;
+    }
+
+    void createWand(lua51::lua_State* state, const network::PlayerState& player) {
+        // This visual replica has no equipped inventory item. Its arm must
+        // follow replicated visibility, not the native `with_item` toggle.
+        const int armSprite = getComponent(state, p_arm, "SpriteComponent", "wand_remote_arm");
+        setComponentEnabled(state, p_arm, armSprite, player.hasArm && player.hasWand);
+        if (p_entity == 0 || !player.hasArm || !player.hasWand || player.wandSprite[0] == '\0') {
+            killWand(state);
+            return;
+        }
+        if (p_wandEntity != 0 && std::strcmp(p_wandSprite, player.wandSprite) == 0) {
+            setComponentEnabled(state, p_wandEntity, p_wandSpriteComponent, true);
+            return;
+        }
+
+        killWand(state);
+        const int top = lua51::getTop(state);
+        if (!beginCall(state, "EntityCreateNew", top)) {
+            return;
+        }
+        lua51::pushString(state, "WANd remote hand visual");
+        if (lua51::pcall(state, 1, 1, 0) != 0 || lua51::type(state, -1) != lua51::typeNumber) {
+            lua51::setTop(state, top);
+            return;
+        }
+        p_wandEntity = static_cast<int>(lua51::toNumber(state, -1));
+        lua51::setTop(state, top);
+        if (p_wandEntity == 0) {
+            return;
+        }
+
+        if (!beginCall(state, "EntityAddComponent2", top)) {
+            killWand(state);
+            return;
+        }
+        lua51::pushNumber(state, p_wandEntity);
+        lua51::pushString(state, "SpriteComponent");
+        lua51::createTable(state, 0, 6);
+        lua51::pushString(state, "wand_remote_sprite");
+        lua51::setField(state, -2, "_tags");
+        lua51::pushString(state, player.wandSprite);
+        lua51::setField(state, -2, "image_file");
+        lua51::pushString(state, "default");
+        lua51::setField(state, -2, "rect_animation");
+        lua51::pushNumber(state, 0);
+        lua51::setField(state, -2, "offset_x");
+        lua51::pushNumber(state, 0);
+        lua51::setField(state, -2, "offset_y");
+        lua51::pushNumber(state, 0.595);
+        lua51::setField(state, -2, "z_index");
+        lua51::pushBoolean(state, true);
+        lua51::setField(state, -2, "update_transform");
+        if (lua51::pcall(state, 3, 1, 0) != 0 || lua51::type(state, -1) != lua51::typeNumber) {
+            lua51::setTop(state, top);
+            killWand(state);
+            return;
+        }
+        p_wandSpriteComponent = static_cast<int>(lua51::toNumber(state, -1));
+        lua51::setTop(state, top);
+
+        if (!beginCall(state, "EntityAddComponent2", top)) {
+            killWand(state);
+            return;
+        }
+        lua51::pushNumber(state, p_wandEntity);
+        lua51::pushString(state, "InheritTransformComponent");
+        lua51::createTable(state, 0, 2);
+        lua51::pushString(state, "right_arm_root");
+        lua51::setField(state, -2, "parent_hotspot_tag");
+        // Held-image coordinates use the shoulder, just like the arm image.
+        // Both siblings inherit body position and receive the same arm pose.
+        lua51::pushBoolean(state, true);
+        lua51::setField(state, -2, "only_position");
+        if (lua51::pcall(state, 3, 1, 0) != 0 || lua51::type(state, -1) != lua51::typeNumber) {
+            lua51::setTop(state, top);
+            killWand(state);
+            return;
+        }
+        lua51::setTop(state, top);
+
+        if (!beginCall(state, "EntityAddChild", top)) {
+            killWand(state);
+            return;
+        }
+        lua51::pushNumber(state, p_entity);
+        lua51::pushNumber(state, p_wandEntity);
+        if (lua51::pcall(state, 2, 0, 0) != 0) {
+            lua51::setTop(state, top);
+            killWand(state);
+            return;
+        }
+        lua51::setTop(state, top);
+
+        setComponentEnabled(state, p_wandEntity, p_wandSpriteComponent, true);
+
+        strncpy_s(p_wandSprite, sizeof(p_wandSprite), player.wandSprite, _TRUNCATE);
+        monitor::write("log", "Wand visual: ability sprite, shared shoulder and arm pose");
+        p_loggedHandHotspot = true;
+    }
+
+    void setPosition(lua51::lua_State* state, int entity, float x, float y, bool facingLeft) {
         const int top = lua51::getTop(state);
         if (beginCall(state, "EntitySetTransform", top)) {
             lua51::pushNumber(state, entity);
             lua51::pushNumber(state, x);
             lua51::pushNumber(state, y);
-            lua51::pcall(state, 3, 0, 0);
+            lua51::pushNumber(state, 0);
+            lua51::pushNumber(state, facingLeft ? -1 : 1);
+            lua51::pushNumber(state, 1);
+            lua51::pcall(state, 6, 0, 0);
         }
         lua51::setTop(state, top);
     }
 
-    void setFacing(lua51::lua_State* state, bool facingLeft) {
-        if (p_sprite == 0 || p_hasFacing && p_facingLeft == facingLeft) {
+    void applyHeldPose(lua51::lua_State* state, const network::PlayerState& player) {
+        if (!player.hasArm || !p_arm) return;
+        float x = 0, y = 0;
+        if (!getWorldHotspot(state, p_entity, "right_arm_root", x, y)) return;
+        const int top = lua51::getTop(state);
+        for (int entity : {p_arm, p_wandEntity}) {
+            if (!entity || !beginCall(state, "EntitySetTransform", top)) continue;
+            lua51::pushNumber(state, entity);
+            lua51::pushNumber(state, x);
+            lua51::pushNumber(state, y);
+            lua51::pushNumber(state, player.armRotation);
+            lua51::pushNumber(state, 1);
+            lua51::pushNumber(state, player.armScaleY);
+            lua51::pcall(state, 6, 0, 0);
+            lua51::setTop(state, top);
+        }
+    }
+
+    void logAttachment(lua51::lua_State* state) {
+        static DWORD lastSample = 0;
+        static unsigned samples = 0;
+        if (!p_arm || !p_wandEntity || samples >= 300 || GetTickCount() - lastSample < 200) return;
+        lastSample = GetTickCount();
+        float handX = 0, handY = 0;
+        if (!getWorldHotspot(state, p_arm, "hand", handX, handY)) return;
+        float pose[2][5]{};
+        const int entities[] = {p_arm, p_wandEntity};
+        const int top = lua51::getTop(state);
+        int wandParent = 0;
+        bool armVisible = false;
+        const int armSprite = getComponent(state, p_arm, "SpriteComponent", "wand_remote_arm");
+        if (beginCall(state, "ComponentGetIsEnabled", top)) {
+            lua51::pushNumber(state, armSprite);
+            if (lua51::pcall(state, 1, 1, 0) == 0) armVisible = lua51::toBoolean(state, -1);
+            lua51::setTop(state, top);
+        }
+        if (beginCall(state, "EntityGetParent", top)) {
+            lua51::pushNumber(state, p_wandEntity);
+            if (lua51::pcall(state, 1, 1, 0) == 0)
+                wandParent = static_cast<int>(lua51::toNumber(state, -1));
+            lua51::setTop(state, top);
+        }
+        for (int i = 0; i < 2; ++i) {
+            if (!beginCall(state, "EntityGetTransform", top)) return;
+            lua51::pushNumber(state, entities[i]);
+            if (lua51::pcall(state, 1, 5, 0) != 0) {
+                lua51::setTop(state, top);
+                return;
+            }
+            for (int j = 0; j < 5; ++j) pose[i][j] = static_cast<float>(lua51::toNumber(state, -5 + j));
+            lua51::setTop(state, top);
+        }
+        char folder[MAX_PATH]{};
+        if (!GetTempPathA(MAX_PATH, folder)) return;
+        char path[MAX_PATH]{};
+        _snprintf_s(path, sizeof(path), _TRUNCATE, "%sWANd-attachment-%lu.csv", folder, GetCurrentProcessId());
+        FILE* file = nullptr;
+        if (fopen_s(&file, path, samples == 0 ? "w" : "a") != 0 || !file) return;
+        if (samples == 0) std::fprintf(file, "tick,arm_id,wand_id,hand_x,hand_y,arm_x,arm_y,arm_rotation,arm_sx,arm_sy,wand_x,wand_y,wand_rotation,wand_sx,wand_sy,sprite,wand_parent,arm_visible\n");
+        std::fprintf(file, "%lu,%d,%d,%.4f,%.4f", lastSample, p_arm, p_wandEntity, handX, handY);
+        for (const auto& entityPose : pose) for (float value : entityPose) std::fprintf(file, ",%.4f", value);
+        std::fprintf(file, ",%s,%d,%d\n", p_wandSprite, wandParent, armVisible ? 1 : 0);
+        std::fclose(file);
+        ++samples;
+    }
+
+    bool entityAlive(lua51::lua_State* state, int entity) {
+        const int top = lua51::getTop(state);
+        if (!beginCall(state, "EntityGetIsAlive", top)) {
+            return true;
+        }
+        lua51::pushNumber(state, entity);
+        if (lua51::pcall(state, 1, 1, 0) != 0 || lua51::type(state, -1) != lua51::typeBoolean) {
+            lua51::setTop(state, top);
+            return true;
+        }
+        const bool alive = lua51::toBoolean(state, -1);
+        lua51::setTop(state, top);
+        return alive;
+    }
+
+    void setAim(lua51::lua_State* state) {
+        const float mouseX = p_x + p_aimX * 60.0f;
+        const float mouseY = p_y + p_aimY * 60.0f;
+        setVector(state, p_controls, "mAimingVector", p_aimX * 60.0f, p_aimY * 60.0f);
+        setVector(state, p_controls, "mAimingVectorNormalized", p_aimX, p_aimY);
+        setVector(state, p_controls, "mAimingVectorNonZeroLatest", p_aimX, p_aimY);
+        setVector(state, p_controls, "mMousePositionRaw", mouseX, mouseY);
+        setVector(state, p_controls, "mMousePositionRawPrev", mouseX, mouseY);
+        setVector(state, p_controls, "mMouseDelta", 0.0, 0.0);
+        setVector(state, p_controls, "mMousePosition", mouseX, mouseY);
+    }
+
+    void setAnimation(lua51::lua_State* state, const char* animation) {
+        if (p_sprite == 0 || animation == nullptr || std::strcmp(p_animation, animation) == 0) {
             return;
         }
 
         const int top = lua51::getTop(state);
         if (beginCall(state, "ComponentSetValue2", top)) {
             lua51::pushNumber(state, p_sprite);
-            lua51::pushString(state, "special_scale_x");
-            float scaleX = 1.0f;
-            if (facingLeft) {
-                scaleX = -1.0f;
-            }
-            lua51::pushNumber(state, scaleX);
+            lua51::pushString(state, "rect_animation");
+            lua51::pushString(state, animation);
             lua51::pcall(state, 3, 0, 0);
         }
         lua51::setTop(state, top);
-        p_facingLeft = facingLeft;
-        p_hasFacing = true;
+        strncpy_s(p_animation, sizeof(p_animation), animation, _TRUNCATE);
+    }
+
+    void resetMotion() {
+        p_x = 0.0f;
+        p_y = 0.0f;
+        p_fromX = 0.0f;
+        p_fromY = 0.0f;
+        p_toX = 0.0f;
+        p_toY = 0.0f;
+        p_velocityX = 0.0f;
+        p_velocityY = 0.0f;
+        p_aimX = 1.0f;
+        p_aimY = 0.0f;
+        p_fromAimX = 1.0f;
+        p_fromAimY = 0.0f;
+        p_toAimX = 1.0f;
+        p_toAimY = 0.0f;
+        p_sequence = 0;
+        p_snapshotStart = 0;
+        p_snapshotDuration = p_snapshotTime;
+        p_lastPacket = 0;
+    }
+
+    void updateMotion(const network::PlayerState& player, std::uint32_t sequence, DWORD now) {
+        if (sequence == 0 || sequence == p_sequence) {
+            const DWORD elapsed = now - p_snapshotStart;
+            if (elapsed > p_snapshotDuration) {
+                const DWORD extra = (std::min)(elapsed - p_snapshotDuration, p_maxExtrapolation);
+                p_x = p_toX + p_velocityX * static_cast<float>(extra) * 0.06f;
+                p_y = p_toY + p_velocityY * static_cast<float>(extra) * 0.06f;
+            }
+            return;
+        }
+
+        p_fromX = p_x;
+        p_fromY = p_y;
+        p_toX = player.x;
+        p_toY = player.y;
+        p_velocityX = player.velocityX;
+        p_velocityY = player.velocityY;
+        p_fromAimX = p_aimX;
+        p_fromAimY = p_aimY;
+        p_toAimX = player.aimX;
+        p_toAimY = player.aimY;
+        p_sequence = sequence;
+        DWORD duration = p_snapshotTime;
+        if (p_lastPacket != 0) {
+            duration = (std::clamp)(now - p_lastPacket, 20UL, 100UL);
+        }
+        p_snapshotStart = now;
+        p_snapshotDuration = duration;
+        p_lastPacket = now;
+
+        if (p_snapshotDuration == 0) {
+            p_x = p_toX;
+            p_y = p_toY;
+        }
+    }
+
+    void applyMotion(DWORD now) {
+        if (p_snapshotDuration == 0) {
+            return;
+        }
+
+        const DWORD elapsed = now - p_snapshotStart;
+        if (elapsed <= p_snapshotDuration) {
+            const float amount = static_cast<float>(elapsed) / static_cast<float>(p_snapshotDuration);
+            p_x = p_fromX + (p_toX - p_fromX) * amount;
+            p_y = p_fromY + (p_toY - p_fromY) * amount;
+            p_aimX = p_fromAimX + (p_toAimX - p_fromAimX) * amount;
+            p_aimY = p_fromAimY + (p_toAimY - p_fromAimY) * amount;
+            const float length = std::sqrt(p_aimX * p_aimX + p_aimY * p_aimY);
+            if (length > 0.001f) {
+                p_aimX /= length;
+                p_aimY /= length;
+            }
+        } else {
+            const DWORD extra = (std::min)(elapsed - p_snapshotDuration, p_maxExtrapolation);
+            p_x = p_toX + p_velocityX * static_cast<float>(extra) * 0.06f;
+            p_y = p_toY + p_velocityY * static_cast<float>(extra) * 0.06f;
+            p_aimX = p_toAimX;
+            p_aimY = p_toAimY;
+        }
     }
 }
 
@@ -138,16 +883,11 @@ void remote_player::update(lua51::lua_State* state) {
         return;
     }
 
-    void* const gameState = InterlockedCompareExchangePointer(&p_gameState, nullptr, nullptr);
-    if (gameState != nullptr && gameState != state) {
-        return;
-    }
-
     network::PlayerState player{};
-    if (network::status() != network::Status::connected || !network::getRemotePlayer(player)) {
-        if (gameState == state) {
-            killRemote(state);
-        }
+    std::uint32_t sequence = 0;
+    if (network::status() != network::Status::connected || !network::getRemotePlayer(player, sequence)) {
+        killRemote(state);
+        resetMotion();
         return;
     }
 
@@ -157,33 +897,73 @@ void remote_player::update(lua51::lua_State* state) {
     }
     p_lastUpdate = now;
 
-    if (gameState == nullptr) {
-        InterlockedExchangePointer(&p_gameState, state);
+    if (p_entity != 0 && !entityAlive(state, p_entity)) {
+        killEntity(state, p_wandEntity);
+        killEntity(state, p_arm);
+        p_entity = 0;
+        p_sprite = 0;
+        p_arm = 0;
+        p_wandEntity = 0;
+        p_wandSpriteComponent = 0;
+        p_controls = 0;
+        p_inventory = 0;
+        p_quickInventory = 0;
+        p_wandSprite[0] = '\0';
+        p_loggedHandHotspot = false;
     }
     if (p_entity == 0) {
-        p_entity = createEntity(state, player);
+        p_entity = createDefinedEntity(state, player);
         if (p_entity == 0 || p_sprite == 0) {
             killRemote(state);
             return;
         }
         p_x = player.x;
         p_y = player.y;
-        p_hasFacing = false;
+        p_fromX = player.x;
+        p_fromY = player.y;
+        p_toX = player.x;
+        p_toY = player.y;
+        p_velocityX = player.velocityX;
+        p_velocityY = player.velocityY;
+        p_aimX = player.aimX;
+        p_aimY = player.aimY;
+        p_fromAimX = player.aimX;
+        p_fromAimY = player.aimY;
+        p_toAimX = player.aimX;
+        p_toAimY = player.aimY;
+        p_sequence = sequence;
+        p_snapshotStart = now;
+        p_snapshotDuration = p_snapshotTime;
+        p_lastPacket = now;
+        p_animation[0] = '\0';
         monitor::write("log", "Remote player created");
     } else {
-        p_x += (player.x - p_x) * 0.35f;
-        p_y += (player.y - p_y) * 0.35f;
+        updateMotion(player, sequence, now);
+        applyMotion(now);
     }
 
-    setTransform(state, p_entity, p_x, p_y);
-    setFacing(state, player.facingLeft);
+    setPosition(state, p_entity, p_x, p_y, player.facingLeft);
+    setAnimation(state, player.animation[0] != '\0' ? player.animation : "stand");
+    createWand(state, player);
+    applyHeldPose(state, player);
+    logAttachment(state);
 }
 
 void remote_player::forget(lua51::lua_State* state) {
-    void* const gameState = InterlockedCompareExchangePointer(&p_gameState, nullptr, nullptr);
-    if (gameState == state) {
+    if (state != nullptr) {
         killRemote(state);
-        InterlockedExchangePointer(&p_gameState, nullptr);
-        p_lastUpdate = 0;
+    } else {
+        p_entity = 0;
+        p_sprite = 0;
+        p_arm = 0;
+        p_wandEntity = 0;
+        p_wandSpriteComponent = 0;
+        p_controls = 0;
+        p_inventory = 0;
+        p_quickInventory = 0;
+        p_wandSprite[0] = '\0';
+        p_animation[0] = '\0';
+        p_loggedHandHotspot = false;
     }
+    resetMotion();
 }

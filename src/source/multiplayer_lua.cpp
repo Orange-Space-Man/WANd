@@ -7,7 +7,7 @@
 
 namespace {
     constexpr unsigned short p_defaultPort = 27888;
-    void* volatile p_loadedState = nullptr;
+    LONG p_logged = FALSE;
 
     int luaHost(lua51::lua_State* state) {
         unsigned short port = p_defaultPort;
@@ -60,15 +60,20 @@ bool multiplayer_lua::load(lua51::lua_State* state) {
     if (state == nullptr || !lua51::ready()) {
         return false;
     }
-    if (InterlockedCompareExchangePointer(&p_loadedState, nullptr, nullptr) == state) {
-        return true;
-    }
 
     const int top = lua51::getTop(state);
     lua51::getGlobal(state, "network");
-    if (lua51::type(state, -1) != lua51::typeTable) {
+    if (lua51::type(state, -1) == lua51::typeTable) {
+        lua51::getField(state, -1, "_WANdLoaded");
+        const bool loaded = lua51::type(state, -1) == lua51::typeBoolean && lua51::toBoolean(state, -1);
+        lua51::setTop(state, top + 1);
+        if (loaded) {
+            lua51::setTop(state, top);
+            return true;
+        }
+    } else {
         lua51::setTop(state, top);
-        lua51::createTable(state, 0, 5);
+        lua51::createTable(state, 0, 6);
     }
 
     lua51::pushFunction(state, luaHost);
@@ -81,14 +86,16 @@ bool multiplayer_lua::load(lua51::lua_State* state) {
     lua51::setField(state, -2, "GetStatus");
     lua51::pushFunction(state, luaIsHost);
     lua51::setField(state, -2, "IsHost");
+    lua51::pushBoolean(state, true);
+    lua51::setField(state, -2, "_WANdLoaded");
     lua51::setGlobal(state, "network");
     lua51::setTop(state, top);
 
-    InterlockedExchangePointer(&p_loadedState, state);
-    monitor::write("log", "network Lua API installed");
+    if (InterlockedCompareExchange(&p_logged, TRUE, FALSE) == FALSE) {
+        monitor::write("log", "network Lua API installed");
+    }
     return true;
 }
 
-void multiplayer_lua::forget(lua51::lua_State* state) {
-    InterlockedCompareExchangePointer(&p_loadedState, nullptr, state);
+void multiplayer_lua::forget(lua51::lua_State*) {
 }

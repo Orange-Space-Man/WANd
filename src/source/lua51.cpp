@@ -28,6 +28,7 @@ namespace {
     using LuaType = int(__cdecl*)(lua51::lua_State*, int);
     using LuaToLString = const char*(__cdecl*)(lua51::lua_State*, int, std::size_t*);
     using LuaToNumber = double(__cdecl*)(lua51::lua_State*, int);
+    using LuaToBoolean = int(__cdecl*)(lua51::lua_State*, int);
 
     void* volatile p_state = nullptr;
     LuaLNewState p_newState = nullptr;
@@ -46,6 +47,7 @@ namespace {
     LuaType p_type = nullptr;
     LuaToLString p_toLString = nullptr;
     LuaToNumber p_toNumber = nullptr;
+    LuaToBoolean p_toBoolean = nullptr;
 
     template <typename T>
     T getExport(const char* name) {
@@ -53,8 +55,8 @@ namespace {
     }
 
     void saveState(lua51::lua_State* state) {
-        void* const previous = InterlockedExchangePointer(&p_state, state);
-        if (previous != state) {
+        void* const previous = InterlockedCompareExchangePointer(&p_state, state, nullptr);
+        if (previous == nullptr) {
             monitor::write("lua", "captured");
             monitor::write("log", "Lua state captured");
         }
@@ -79,6 +81,16 @@ namespace {
     }
 
     int __cdecl hookPCall(lua51::lua_State* state, int arguments, int results, int errorFunction) {
+        // EntityLoad and other engine APIs can call Lua again while replica
+        // creation is in progress. Never run a second sync pass inside one:
+        // its process-wide entity handles would overwrite the first hierarchy.
+        static thread_local bool insideCall = false;
+        if (insideCall) return p_pcall(state, arguments, results, errorFunction);
+        struct CallScope {
+            bool& active;
+            explicit CallScope(bool& value) : active(value) { active = true; }
+            ~CallScope() { active = false; }
+        } scope(insideCall);
         saveState(state);
         multiplayer_lua::load(state);
         const int status = p_pcall(state, arguments, results, errorFunction);
@@ -106,6 +118,7 @@ bool lua51::init() {
     p_type = getExport<LuaType>("lua_type");
     p_toLString = getExport<LuaToLString>("lua_tolstring");
     p_toNumber = getExport<LuaToNumber>("lua_tonumber");
+    p_toBoolean = getExport<LuaToBoolean>("lua_toboolean");
 
     const bool newStateHooked = memory::hook_iat(noita::game(), "lua51.dll", "luaL_newstate", reinterpret_cast<void*>(&hookNewState), reinterpret_cast<void**>(&p_newState));
     const bool closeHooked = memory::hook_iat(noita::game(), "lua51.dll", "lua_close", reinterpret_cast<void*>(&hookClose), reinterpret_cast<void**>(&p_close));
@@ -124,7 +137,7 @@ bool lua51::init() {
 }
 
 bool lua51::ready() {
-    return p_newState != nullptr && p_close != nullptr && p_pcall != nullptr && p_getTop != nullptr && p_setTop != nullptr && p_createTable != nullptr && p_getField != nullptr && p_setField != nullptr && p_rawGetIndex != nullptr && p_pushString != nullptr && p_pushNumber != nullptr && p_pushBoolean != nullptr && p_pushCClosure != nullptr && p_type != nullptr && p_toLString != nullptr && p_toNumber != nullptr;
+    return p_newState != nullptr && p_close != nullptr && p_pcall != nullptr && p_getTop != nullptr && p_setTop != nullptr && p_createTable != nullptr && p_getField != nullptr && p_setField != nullptr && p_rawGetIndex != nullptr && p_pushString != nullptr && p_pushNumber != nullptr && p_pushBoolean != nullptr && p_pushCClosure != nullptr && p_type != nullptr && p_toLString != nullptr && p_toNumber != nullptr && p_toBoolean != nullptr;
 }
 
 lua51::lua_State* lua51::getState() {
@@ -193,6 +206,10 @@ const char* lua51::toString(lua_State* state, int index) {
 
 double lua51::toNumber(lua_State* state, int index) {
     return p_toNumber(state, index);
+}
+
+bool lua51::toBoolean(lua_State* state, int index) {
+    return p_toBoolean(state, index) != 0;
 }
 
 int lua51::pcall(lua_State* state, int arguments, int results, int errorFunction) {

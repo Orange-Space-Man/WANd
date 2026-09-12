@@ -6,6 +6,7 @@ namespace lua51 {
 
     constexpr int globalsIndex = -10002;
     constexpr int typeNil = 0;
+    constexpr int typeBoolean = 1;
     constexpr int typeNumber = 3;
     constexpr int typeString = 4;
     constexpr int typeTable = 5;
@@ -29,5 +30,6 @@ namespace lua51 {
     int type(lua_State* state, int index);
     const char* toString(lua_State* state, int index);
     double toNumber(lua_State* state, int index);
+    bool toBoolean(lua_State* state, int index);
     int pcall(lua_State* state, int arguments, int results, int errorFunction);
 }

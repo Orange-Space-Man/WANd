@@ -11,10 +11,12 @@
 
 namespace {
     constexpr std::uint32_t p_magic = 0x57414E44;
-    constexpr std::uint16_t p_version = 1;
+    constexpr std::uint16_t p_version = 26;
     constexpr std::uint16_t p_hello = 1;
     constexpr std::uint16_t p_welcome = 2;
     constexpr std::uint16_t p_player = 3;
+    constexpr std::uint16_t p_runStart = 4;
+    constexpr std::uint16_t p_runReady = 5;
 
     struct Handshake {
         std::uint32_t magic;
@@ -43,11 +45,40 @@ namespace {
         std::uint32_t aimX;
         std::uint32_t aimY;
         std::uint32_t facingLeft;
+        std::uint32_t onGround;
+        std::uint32_t flying;
+        char animation[32];
+        std::uint32_t hasArm;
+        std::uint32_t armX;
+        std::uint32_t armY;
+        std::uint32_t armRotation;
+        std::uint32_t armScaleX;
+        std::uint32_t armScaleY;
+        std::uint32_t hasWand;
+        char wandSprite[256];
+        std::uint32_t wandOffsetX;
+        std::uint32_t wandOffsetY;
+        std::uint32_t wandGripX;
+        std::uint32_t wandGripY;
+        std::uint32_t wandRotation;
+        std::uint32_t wandScaleX;
+        std::uint32_t wandScaleY;
+    };
+
+    struct RunPacket {
+        std::uint32_t run;
+        std::uint32_t seed;
+    };
+
+    struct ReadyPacket {
+        std::uint32_t run;
     };
 
     INIT_ONCE p_started = INIT_ONCE_STATIC_INIT;
     SRWLOCK p_socketLock = SRWLOCK_INIT;
     SRWLOCK p_playerLock = SRWLOCK_INIT;
+    SRWLOCK p_sendLock = SRWLOCK_INIT;
+    SRWLOCK p_runLock = SRWLOCK_INIT;
     LONG p_ready = FALSE;
     LONG p_status = static_cast<LONG>(network::Status::stopped);
     LONG p_role = 0;
@@ -56,7 +87,13 @@ namespace {
     network::PlayerState p_localPlayer{};
     network::PlayerState p_remotePlayer{};
     std::uint32_t p_localSequence = 0;
+    std::uint32_t p_remoteSequence = 0;
     bool p_remotePlayerReady = false;
+    std::uint32_t p_nextRun = 0;
+    std::uint32_t p_waitingRun = 0;
+    std::uint32_t p_receivedSeed = 0;
+    bool p_runIsReady = false;
+    bool p_runReceived = false;
 
     const char* getStatusText(network::Status status) {
         if (status == network::Status::hosting) {
@@ -226,10 +263,96 @@ namespace {
             facingLeft = 1;
         }
         packet.facingLeft = htonl(facingLeft);
-        if (!sendData(socket, &header, sizeof(header))) {
-            return false;
+        std::uint32_t onGround = 0;
+        if (state.onGround) {
+            onGround = 1;
         }
-        return sendData(socket, &packet, sizeof(packet));
+        packet.onGround = htonl(onGround);
+        std::uint32_t flying = 0;
+        if (state.flying) {
+            flying = 1;
+        }
+        packet.flying = htonl(flying);
+        memcpy(packet.animation, state.animation, sizeof(packet.animation));
+        packet.animation[sizeof(packet.animation) - 1] = '\0';
+        packet.hasArm = htonl(state.hasArm ? 1U : 0U);
+        packet.armX = packFloat(state.armX);
+        packet.armY = packFloat(state.armY);
+        packet.armRotation = packFloat(state.armRotation);
+        packet.armScaleX = packFloat(state.armScaleX);
+        packet.armScaleY = packFloat(state.armScaleY);
+        std::uint32_t hasWand = 0;
+        if (state.hasWand) {
+            hasWand = 1;
+        }
+        packet.hasWand = htonl(hasWand);
+        memcpy(packet.wandSprite, state.wandSprite, sizeof(packet.wandSprite));
+        packet.wandSprite[sizeof(packet.wandSprite) - 1] = '\0';
+        packet.wandOffsetX = packFloat(state.wandOffsetX);
+        packet.wandOffsetY = packFloat(state.wandOffsetY);
+        packet.wandGripX = packFloat(state.wandGripX);
+        packet.wandGripY = packFloat(state.wandGripY);
+        packet.wandRotation = packFloat(state.wandRotation);
+        packet.wandScaleX = packFloat(state.wandScaleX);
+        packet.wandScaleY = packFloat(state.wandScaleY);
+        bool sent = false;
+        AcquireSRWLockExclusive(&p_sendLock);
+        if (sendData(socket, &header, sizeof(header))) {
+            sent = sendData(socket, &packet, sizeof(packet));
+        }
+        ReleaseSRWLockExclusive(&p_sendLock);
+        return sent;
+    }
+
+    bool sendRunPacket(SOCKET socket, std::uint16_t type, const void* packet, std::uint32_t size) {
+        PacketHeader header{};
+        header.magic = htonl(p_magic);
+        header.version = htons(p_version);
+        header.type = htons(type);
+        header.size = htonl(size);
+
+        bool sent = false;
+        AcquireSRWLockExclusive(&p_sendLock);
+        if (sendData(socket, &header, sizeof(header))) {
+            sent = sendData(socket, packet, static_cast<int>(size));
+        }
+        ReleaseSRWLockExclusive(&p_sendLock);
+        return sent;
+    }
+
+    void storeRunStart(SOCKET socket, const RunPacket& packet) {
+        const std::uint32_t run = ntohl(packet.run);
+        const std::uint32_t seed = ntohl(packet.seed);
+        if (run == 0 || seed == 0) {
+            return;
+        }
+
+        AcquireSRWLockExclusive(&p_runLock);
+        p_receivedSeed = seed;
+        p_runReceived = true;
+        ReleaseSRWLockExclusive(&p_runLock);
+
+        ReadyPacket ready{};
+        ready.run = htonl(run);
+        sendRunPacket(socket, p_runReady, &ready, sizeof(ready));
+
+        char text[64]{};
+        _snprintf_s(text, sizeof(text), _TRUNCATE, "Run received, seed %lu", seed);
+        monitor::write("log", text);
+    }
+
+    void storeRunReady(const ReadyPacket& packet) {
+        const std::uint32_t run = ntohl(packet.run);
+        bool ready = false;
+        AcquireSRWLockExclusive(&p_runLock);
+        if (run != 0 && run == p_waitingRun) {
+            p_runIsReady = true;
+            ready = true;
+        }
+        ReleaseSRWLockExclusive(&p_runLock);
+        if (ready) {
+            monitor::write("log", "Player ready for new run");
+        }
     }
 
     void storeRemotePlayer(const PlayerPacket& packet) {
@@ -241,9 +364,30 @@ namespace {
         state.aimX = unpackFloat(packet.aimX);
         state.aimY = unpackFloat(packet.aimY);
         state.facingLeft = ntohl(packet.facingLeft) != 0;
+        state.onGround = ntohl(packet.onGround) != 0;
+        state.flying = ntohl(packet.flying) != 0;
+        memcpy(state.animation, packet.animation, sizeof(state.animation));
+        state.animation[sizeof(state.animation) - 1] = '\0';
+        state.hasArm = ntohl(packet.hasArm) != 0;
+        state.armX = unpackFloat(packet.armX);
+        state.armY = unpackFloat(packet.armY);
+        state.armRotation = unpackFloat(packet.armRotation);
+        state.armScaleX = unpackFloat(packet.armScaleX);
+        state.armScaleY = unpackFloat(packet.armScaleY);
+        state.hasWand = ntohl(packet.hasWand) != 0;
+        memcpy(state.wandSprite, packet.wandSprite, sizeof(state.wandSprite));
+        state.wandSprite[sizeof(state.wandSprite) - 1] = '\0';
+        state.wandOffsetX = unpackFloat(packet.wandOffsetX);
+        state.wandOffsetY = unpackFloat(packet.wandOffsetY);
+        state.wandGripX = unpackFloat(packet.wandGripX);
+        state.wandGripY = unpackFloat(packet.wandGripY);
+        state.wandRotation = unpackFloat(packet.wandRotation);
+        state.wandScaleX = unpackFloat(packet.wandScaleX);
+        state.wandScaleY = unpackFloat(packet.wandScaleY);
 
         AcquireSRWLockExclusive(&p_playerLock);
         p_remotePlayer = state;
+        p_remoteSequence = ntohl(packet.sequence);
         p_remotePlayerReady = true;
         ReleaseSRWLockExclusive(&p_playerLock);
 
@@ -288,16 +432,46 @@ namespace {
             if (!receiveData(socket, &header, sizeof(header))) {
                 break;
             }
-            if (ntohl(header.magic) != p_magic || ntohs(header.version) != p_version || ntohs(header.type) != p_player || ntohl(header.size) != sizeof(PlayerPacket)) {
-                monitor::write("log", "Invalid player packet received");
+            if (ntohl(header.magic) != p_magic || ntohs(header.version) != p_version) {
+                monitor::write("log", "Invalid network packet received");
                 break;
             }
 
-            PlayerPacket packet{};
-            if (!receiveData(socket, &packet, sizeof(packet))) {
+            const std::uint16_t type = ntohs(header.type);
+            const std::uint32_t size = ntohl(header.size);
+            if (type == p_player && size == sizeof(PlayerPacket)) {
+                PlayerPacket packet{};
+                if (!receiveData(socket, &packet, sizeof(packet))) {
+                    break;
+                }
+                storeRemotePlayer(packet);
+                continue;
+            }
+            if (type == p_runStart && size == sizeof(RunPacket)) {
+                RunPacket packet{};
+                if (!receiveData(socket, &packet, sizeof(packet))) {
+                    break;
+                }
+                storeRunStart(socket, packet);
+                continue;
+            }
+            if (type == p_runReady && size == sizeof(ReadyPacket)) {
+                ReadyPacket packet{};
+                if (!receiveData(socket, &packet, sizeof(packet))) {
+                    break;
+                }
+                storeRunReady(packet);
+                continue;
+            }
+
+            monitor::write("log", "Invalid network packet received");
+            if (size > 4096) {
                 break;
             }
-            storeRemotePlayer(packet);
+            char ignored[4096]{};
+            if (!receiveData(socket, ignored, static_cast<int>(size))) {
+                break;
+            }
         }
 
         closePeer(socket);
@@ -502,8 +676,16 @@ void network::stop() {
 
     AcquireSRWLockExclusive(&p_playerLock);
     p_remotePlayer = PlayerState{};
+    p_remoteSequence = 0;
     p_remotePlayerReady = false;
     ReleaseSRWLockExclusive(&p_playerLock);
+
+    AcquireSRWLockExclusive(&p_runLock);
+    p_waitingRun = 0;
+    p_receivedSeed = 0;
+    p_runIsReady = false;
+    p_runReceived = false;
+    ReleaseSRWLockExclusive(&p_runLock);
     monitor::write("remote_player", "");
 }
 
@@ -530,6 +712,63 @@ bool network::isHost() {
     return InterlockedCompareExchange(&p_role, 0, 0) == 1;
 }
 
+bool network::beginRun(std::uint32_t seed) {
+    if (seed == 0 || status() != Status::connected || !isHost()) {
+        return false;
+    }
+
+    SOCKET peer = INVALID_SOCKET;
+    AcquireSRWLockShared(&p_socketLock);
+    peer = p_peer;
+    ReleaseSRWLockShared(&p_socketLock);
+    if (peer == INVALID_SOCKET) {
+        return false;
+    }
+
+    std::uint32_t run = 0;
+    AcquireSRWLockExclusive(&p_runLock);
+    ++p_nextRun;
+    if (p_nextRun == 0) {
+        p_nextRun = 1;
+    }
+    run = p_nextRun;
+    p_waitingRun = run;
+    p_runIsReady = false;
+    ReleaseSRWLockExclusive(&p_runLock);
+
+    RunPacket packet{};
+    packet.run = htonl(run);
+    packet.seed = htonl(seed);
+    if (!sendRunPacket(peer, p_runStart, &packet, sizeof(packet))) {
+        return false;
+    }
+
+    char text[64]{};
+    _snprintf_s(text, sizeof(text), _TRUNCATE, "Starting shared run, seed %lu", seed);
+    monitor::write("log", text);
+    return true;
+}
+
+bool network::runReady() {
+    bool ready = false;
+    AcquireSRWLockShared(&p_runLock);
+    ready = p_runIsReady;
+    ReleaseSRWLockShared(&p_runLock);
+    return ready;
+}
+
+bool network::takeRun(std::uint32_t& seed) {
+    bool received = false;
+    AcquireSRWLockExclusive(&p_runLock);
+    if (p_runReceived) {
+        seed = p_receivedSeed;
+        p_runReceived = false;
+        received = true;
+    }
+    ReleaseSRWLockExclusive(&p_runLock);
+    return received;
+}
+
 void network::sendPlayer(const PlayerState& state) {
     AcquireSRWLockExclusive(&p_playerLock);
     p_localPlayer = state;
@@ -540,12 +779,13 @@ void network::sendPlayer(const PlayerState& state) {
     ReleaseSRWLockExclusive(&p_playerLock);
 }
 
-bool network::getRemotePlayer(PlayerState& state) {
+bool network::getRemotePlayer(PlayerState& state, std::uint32_t& sequence) {
     bool ready = false;
     AcquireSRWLockShared(&p_playerLock);
     ready = p_remotePlayerReady;
     if (ready) {
         state = p_remotePlayer;
+        sequence = p_remoteSequence;
     }
     ReleaseSRWLockShared(&p_playerLock);
     return ready;

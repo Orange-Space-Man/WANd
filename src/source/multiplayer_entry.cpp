@@ -1,6 +1,8 @@
 #include "multiplayer_entry.h"
 
 #include "control.h"
+#include "game_pause.h"
+#include "game_start.h"
 #include "lua51.h"
 #include "monitor.h"
 #include "network.h"
@@ -15,6 +17,8 @@ namespace {
 
     DWORD WINAPI hookNoita(LPVOID) {
         if (noita::init()) {
+            game_start::init();
+            game_pause::init();
             lua51::init();
         } else {
             monitor::write("lua", "lua51.dll not found");
@@ -82,7 +86,7 @@ extern "C" void __cdecl WANdStop() {
     network::stop();
 }
 
-extern "C" int __cdecl WANdStatus() {
+extern "C" int __cdecl WANdStatus() { 
     return static_cast<int>(network::status());
 }
 

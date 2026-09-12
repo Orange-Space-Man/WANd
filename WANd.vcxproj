@@ -88,6 +88,8 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="control.h" />
+    <ClInclude Include="game_pause.h" />
+    <ClInclude Include="game_start.h" />
     <ClInclude Include="lua51.h" />
     <ClInclude Include="memory.h" />
     <ClInclude Include="monitor.h" />
@@ -100,6 +102,8 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="control.cpp" />
+    <ClCompile Include="game_pause.cpp" />
+    <ClCompile Include="game_start.cpp" />
     <ClCompile Include="lua51.cpp" />
     <ClCompile Include="memory.cpp" />
     <ClCompile Include="monitor.cpp" />

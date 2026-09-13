@@ -21,6 +21,8 @@ namespace network {
         float armScaleX;
         float armScaleY;
         bool hasWand;
+        bool heldObject;
+        char flaskMaterial[64];
         char wandSprite[256];
         float wandOffsetX;
         float wandOffsetY;

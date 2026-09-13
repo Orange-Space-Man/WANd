@@ -633,6 +633,8 @@ namespace {
     void createWand(lua51::lua_State* state, const network::PlayerState& player) {
         static float previousHandX = 0, previousHandY = 0;
         static float previousOffsetX = 0, previousOffsetY = 0;
+        static bool previousHeldObject = false;
+        static std::string previousFlaskMaterial;
         // This visual replica has no equipped inventory item. Its arm must
         // follow replicated visibility, not the native `with_item` toggle.
         const int armSprite = getComponent(state, p_arm, "SpriteComponent", "wand_remote_arm");
@@ -656,6 +658,8 @@ namespace {
         handY = static_cast<float>(lua51::toNumber(state, -1));
         lua51::setTop(state, hotspotTop);
         if (p_wandEntity != 0 && std::strcmp(p_wandSprite, player.wandSprite) == 0
+            && previousHeldObject == player.heldObject
+            && previousFlaskMaterial == player.flaskMaterial
             && previousHandX == handX && previousHandY == handY
             && previousOffsetX == player.wandOffsetX && previousOffsetY == player.wandOffsetY) {
             setComponentEnabled(state, p_wandEntity, p_wandSpriteComponent, true);
@@ -678,7 +682,7 @@ namespace {
             return;
         }
 
-        const std::string imagePath = gripSprite(state, player.wandSprite, handX, handY);
+        const std::string imagePath = player.heldObject ? std::string(player.wandSprite) : gripSprite(state, player.wandSprite, handX, handY);
         if (imagePath.empty()) { killWand(state); return; }
         const bool rawImage = imagePath.size() < 4 || imagePath.substr(imagePath.size() - 4) != ".xml";
         if (!beginCall(state, "EntityAddComponent2", top)) {
@@ -694,9 +698,9 @@ namespace {
         lua51::setField(state, -2, "image_file");
         lua51::pushString(state, "default");
         lua51::setField(state, -2, "rect_animation");
-        lua51::pushNumber(state, rawImage ? player.wandOffsetX - handX : 0);
+        lua51::pushNumber(state, player.heldObject ? player.wandOffsetX : (rawImage ? player.wandOffsetX - handX : 0));
         lua51::setField(state, -2, "offset_x");
-        lua51::pushNumber(state, rawImage ? player.wandOffsetY - handY : 0);
+        lua51::pushNumber(state, player.heldObject ? player.wandOffsetY : (rawImage ? player.wandOffsetY - handY : 0));
         lua51::setField(state, -2, "offset_y");
         lua51::pushNumber(state, 0.595);
         lua51::setField(state, -2, "z_index");
@@ -710,6 +714,45 @@ namespace {
         p_wandSpriteComponent = static_cast<int>(lua51::toNumber(state, -1));
         lua51::setTop(state, top);
 
+        if (player.heldObject && player.flaskMaterial[0]) {
+            int material = 0;
+            if (beginCall(state, "CellFactory_GetType", top)) {
+                lua51::pushString(state, player.flaskMaterial);
+                if (lua51::pcall(state, 1, 1, 0) == 0 && lua51::type(state, -1) == lua51::typeNumber)
+                    material = static_cast<int>(lua51::toNumber(state, -1));
+                lua51::setTop(state, top);
+            }
+            if (material > 0) {
+                for (const char* type : {"MaterialInventoryComponent", "PotionComponent"}) {
+                    if (!beginCall(state, "EntityAddComponent2", top)) { killWand(state); return; }
+                    lua51::pushNumber(state, p_wandEntity);
+                    lua51::pushString(state, type);
+                    lua51::createTable(state, 0, 6);
+                    if (std::strcmp(type, "MaterialInventoryComponent") == 0) {
+                        for (const char* field : {"drop_as_item", "on_death_spill", "do_reactions_explosions", "do_reactions_entities"}) {
+                            lua51::pushBoolean(state, false); lua51::setField(state, -2, field);
+                        }
+                        lua51::pushNumber(state, 0); lua51::setField(state, -2, "do_reactions");
+                    } else {
+                        lua51::pushNumber(state, material); lua51::setField(state, -2, "custom_color_material");
+                        lua51::pushNumber(state, 0); lua51::setField(state, -2, "spray_velocity_coeff");
+                        lua51::pushBoolean(state, false); lua51::setField(state, -2, "body_colored");
+                    }
+                    if (lua51::pcall(state, 3, 1, 0) != 0 || lua51::type(state, -1) != lua51::typeNumber) {
+                        lua51::setTop(state, top); killWand(state); return;
+                    }
+                    lua51::setTop(state, top);
+                }
+                if (beginCall(state, "AddMaterialInventoryMaterial", top)) {
+                    lua51::pushNumber(state, p_wandEntity);
+                    lua51::pushString(state, player.flaskMaterial);
+                    lua51::pushNumber(state, 1);
+                    lua51::pcall(state, 3, 0, 0);
+                    lua51::setTop(state, top);
+                }
+            }
+        }
+        if (!player.heldObject) {
         if (!beginCall(state, "EntityAddComponent2", top)) {
             killWand(state);
             return;
@@ -730,6 +773,7 @@ namespace {
         }
         lua51::setTop(state, top);
 
+        }
         if (!beginCall(state, "EntityAddChild", top)) {
             killWand(state);
             return;
@@ -750,6 +794,8 @@ namespace {
         previousHandY = handY;
         previousOffsetX = player.wandOffsetX;
         previousOffsetY = player.wandOffsetY;
+        previousHeldObject = player.heldObject;
+        previousFlaskMaterial = player.flaskMaterial;
         monitor::write("log", "Wand visual: ability sprite, shared shoulder and arm pose");
         p_loggedHandHotspot = true;
     }
@@ -775,12 +821,13 @@ namespace {
         const int top = lua51::getTop(state);
         for (int entity : {p_arm, p_wandEntity}) {
             if (!entity || !beginCall(state, "EntitySetTransform", top)) continue;
+            const bool object = entity == p_wandEntity && player.heldObject;
             lua51::pushNumber(state, entity);
-            lua51::pushNumber(state, x);
-            lua51::pushNumber(state, y);
-            lua51::pushNumber(state, player.armRotation);
-            lua51::pushNumber(state, 1);
-            lua51::pushNumber(state, player.armScaleY);
+            lua51::pushNumber(state, x + (object ? player.wandGripX : 0));
+            lua51::pushNumber(state, y + (object ? player.wandGripY : 0));
+            lua51::pushNumber(state, object ? player.wandRotation : player.armRotation);
+            lua51::pushNumber(state, object ? player.wandScaleX : 1);
+            lua51::pushNumber(state, object ? player.wandScaleY : player.armScaleY);
             lua51::pcall(state, 6, 0, 0);
             lua51::setTop(state, top);
         }

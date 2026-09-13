@@ -470,6 +470,65 @@ void player_sync::update(lua51::lua_State* state) {
     playerState.hasWand = getWand(state, player, wand, playerState.wandSprite, sizeof(playerState.wandSprite),
         playerState.wandOffsetX, playerState.wandOffsetY, wandWorldX, wandWorldY, playerState.wandRotation,
         playerState.wandScaleX, playerState.wandScaleY);
+    if (!playerState.hasWand && wand != 0 && !hasTag(state, wand, "wand")) {
+        const int sprite = getTaggedComponent(state, wand, "SpriteComponent", "enabled_in_hand");
+        const int top = lua51::getTop(state);
+        if (sprite != 0) {
+            lua51::getGlobal(state, "ComponentGetValue2");
+            lua51::pushNumber(state, sprite);
+            lua51::pushString(state, "image_file");
+            if (lua51::pcall(state, 2, 1, 0) == 0 && lua51::type(state, -1) == lua51::typeString) {
+                const char* image = lua51::toString(state, -1);
+                if (image && image[0]) {
+                    strncpy_s(playerState.wandSprite, sizeof(playerState.wandSprite), image, _TRUNCATE);
+                    playerState.heldObject = true;
+                }
+            }
+            lua51::setTop(state, top);
+            const char* names[] = {"offset_x", "offset_y"};
+            float* offsets[] = {&playerState.wandOffsetX, &playerState.wandOffsetY};
+            for (int i = 0; i < 2; ++i) {
+                lua51::getGlobal(state, "ComponentGetValue2");
+                lua51::pushNumber(state, sprite);
+                lua51::pushString(state, names[i]);
+                if (lua51::pcall(state, 2, 1, 0) == 0 && lua51::type(state, -1) == lua51::typeNumber)
+                    *offsets[i] = static_cast<float>(lua51::toNumber(state, -1));
+                else playerState.heldObject = false;
+                lua51::setTop(state, top);
+            }
+            playerState.hasWand = playerState.heldObject && getFullTransform(state, wand, wandWorldX, wandWorldY,
+                playerState.wandRotation, playerState.wandScaleX, playerState.wandScaleY);
+            playerState.wandGripX = wandWorldX - armWorldX;
+            playerState.wandGripY = wandWorldY - armWorldY;
+        }
+    }
+    if (playerState.hasWand && playerState.heldObject && getComponent(state, wand, "PotionComponent") != 0
+        && !getComponentBool(state, wand, "PotionComponent", "never_color")) {
+        const int top = lua51::getTop(state);
+        int material = 0;
+        lua51::getGlobal(state, "ComponentGetValue2");
+        lua51::pushNumber(state, getComponent(state, wand, "PotionComponent"));
+        lua51::pushString(state, "custom_color_material");
+        if (lua51::pcall(state, 2, 1, 0) == 0 && lua51::type(state, -1) == lua51::typeNumber)
+            material = static_cast<int>(lua51::toNumber(state, -1));
+        lua51::setTop(state, top);
+        if (material == 0) {
+            lua51::getGlobal(state, "GetMaterialInventoryMainMaterial");
+            lua51::pushNumber(state, wand);
+            if (lua51::pcall(state, 1, 1, 0) == 0 && lua51::type(state, -1) == lua51::typeNumber)
+                material = static_cast<int>(lua51::toNumber(state, -1));
+            lua51::setTop(state, top);
+        }
+        if (material > 0) {
+            lua51::getGlobal(state, "CellFactory_GetName");
+            lua51::pushNumber(state, material);
+            if (lua51::pcall(state, 1, 1, 0) == 0 && lua51::type(state, -1) == lua51::typeString) {
+                const char* name = lua51::toString(state, -1);
+                if (name) strncpy_s(playerState.flaskMaterial, sizeof(playerState.flaskMaterial), name, _TRUNCATE);
+            }
+            lua51::setTop(state, top);
+        }
+    }
     network::sendPlayer(playerState);
 
     char text[256]{};

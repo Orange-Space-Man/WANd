@@ -11,7 +11,7 @@
 
 namespace {
     constexpr std::uint32_t p_magic = 0x57414E44;
-    constexpr std::uint16_t p_version = 26;
+    constexpr std::uint16_t p_version = 28;
     constexpr std::uint16_t p_hello = 1;
     constexpr std::uint16_t p_welcome = 2;
     constexpr std::uint16_t p_player = 3;
@@ -56,6 +56,7 @@ namespace {
         std::uint32_t armScaleY;
         std::uint32_t hasWand;
         char wandSprite[256];
+        char flaskMaterial[64];
         std::uint32_t wandOffsetX;
         std::uint32_t wandOffsetY;
         std::uint32_t wandGripX;
@@ -286,8 +287,11 @@ namespace {
             hasWand = 1;
         }
         packet.hasWand = htonl(hasWand);
+        if (state.heldObject) packet.hasWand = htonl(hasWand | 2U);
         memcpy(packet.wandSprite, state.wandSprite, sizeof(packet.wandSprite));
         packet.wandSprite[sizeof(packet.wandSprite) - 1] = '\0';
+        memcpy(packet.flaskMaterial, state.flaskMaterial, sizeof(packet.flaskMaterial));
+        packet.flaskMaterial[sizeof(packet.flaskMaterial) - 1] = '\0';
         packet.wandOffsetX = packFloat(state.wandOffsetX);
         packet.wandOffsetY = packFloat(state.wandOffsetY);
         packet.wandGripX = packFloat(state.wandGripX);
@@ -374,9 +378,12 @@ namespace {
         state.armRotation = unpackFloat(packet.armRotation);
         state.armScaleX = unpackFloat(packet.armScaleX);
         state.armScaleY = unpackFloat(packet.armScaleY);
-        state.hasWand = ntohl(packet.hasWand) != 0;
+        state.hasWand = (ntohl(packet.hasWand) & 1U) != 0;
+        state.heldObject = (ntohl(packet.hasWand) & 2U) != 0;
         memcpy(state.wandSprite, packet.wandSprite, sizeof(state.wandSprite));
         state.wandSprite[sizeof(state.wandSprite) - 1] = '\0';
+        memcpy(state.flaskMaterial, packet.flaskMaterial, sizeof(state.flaskMaterial));
+        state.flaskMaterial[sizeof(state.flaskMaterial) - 1] = '\0';
         state.wandOffsetX = unpackFloat(packet.wandOffsetX);
         state.wandOffsetY = unpackFloat(packet.wandOffsetY);
         state.wandGripX = unpackFloat(packet.wandGripX);

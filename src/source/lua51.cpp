@@ -69,11 +69,11 @@ namespace {
     }
 
     void __cdecl hookClose(lua51::lua_State* state) {
-        multiplayer_lua::forget(state);
-        player_sync::forget(state);
-        remote_player::forget(state);
         void* const previous = InterlockedCompareExchangePointer(&p_state, nullptr, state);
         if (previous == state) {
+            multiplayer_lua::forget(state);
+            player_sync::forget(state);
+            remote_player::forget(state);
             monitor::write("lua", "waiting");
             monitor::write("log", "Lua state closed");
         }

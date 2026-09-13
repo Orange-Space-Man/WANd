@@ -7,7 +7,7 @@
 #pragma comment(lib, "ole32.lib")
 
 namespace wand_image {
-struct Grip { int x, y; };
+struct Grip { int x, y, tipX, tipY; };
 inline bool locate(const std::vector<unsigned char>& rgba, int width, int height, Grip& grip) {
     if (width <= 0 || height <= 0 || rgba.size() != size_t(width) * height * 4) return false;
     int left = width, right = -1;
@@ -31,6 +31,11 @@ inline bool locate(const std::vector<unsigned char>& rgba, int width, int height
             if (score < best) { best = score; grip = {x, y}; }
         }
     }
+    grip.tipX = right;
+    int tipSum = 0, tipCount = 0;
+    for (int y = 0; y < height; ++y)
+        if (rgba[(size_t(y) * width + right) * 4 + 3] >= 128) { tipSum += y; ++tipCount; }
+    grip.tipY = tipSum / tipCount;
     return true;
 }
 inline std::vector<unsigned char> read(const std::string& path) {

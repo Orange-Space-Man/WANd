@@ -8,10 +8,16 @@
 
 #include <cstdio>
 #include <cstring>
+#include <deque>
+#include <cmath>
 
 namespace {
     constexpr std::uint32_t p_magic = 0x57414E44;
-    constexpr std::uint16_t p_version = 28;
+    constexpr std::uint16_t p_version = 31;
+    constexpr std::uint16_t p_projectile = 6;
+    struct ProjectilePacket { std::uint32_t kind, objectId; char explosion[4096]; char path[256]; char flash[256]; std::uint32_t values[15]; };
+    SRWLOCK p_projectileLock = SRWLOCK_INIT;
+    std::deque<network::ProjectileEvent> p_incomingProjectiles, p_outgoingProjectiles;
     constexpr std::uint16_t p_hello = 1;
     constexpr std::uint16_t p_welcome = 2;
     constexpr std::uint16_t p_player = 3;
@@ -110,6 +116,11 @@ namespace {
     }
 
     void setStatus(network::Status status) {
+        if (status == network::Status::stopped) {
+            AcquireSRWLockExclusive(&p_projectileLock);
+            p_incomingProjectiles.clear(); p_outgoingProjectiles.clear();
+            ReleaseSRWLockExclusive(&p_projectileLock);
+        }
         InterlockedExchange(&p_status, static_cast<LONG>(status));
         if (status == network::Status::stopped) {
             InterlockedExchange(&p_role, 0);
@@ -424,6 +435,21 @@ namespace {
                 }
                 sentSequence = sequence;
             }
+            std::deque<network::ProjectileEvent> shots;
+            AcquireSRWLockExclusive(&p_projectileLock);
+            shots.swap(p_outgoingProjectiles);
+            ReleaseSRWLockExclusive(&p_projectileLock);
+            bool shotFailed = false;
+            for (const auto& shot : shots) {
+                ProjectilePacket packet{};
+                packet.kind = htonl(shot.kind); packet.objectId = htonl(shot.objectId);
+                memcpy(packet.explosion, shot.explosion, sizeof(packet.explosion));
+                memcpy(packet.path, shot.path, sizeof(packet.path));
+                memcpy(packet.flash, shot.flash, sizeof(packet.flash));
+                for (int i = 0; i < 15; ++i) packet.values[i] = packFloat(shot.values[i]);
+                if (!sendRunPacket(socket, p_projectile, &packet, sizeof(packet))) { shotFailed = true; break; }
+            }
+            if (shotFailed) break;
             Sleep(10);
         }
 
@@ -446,6 +472,33 @@ namespace {
 
             const std::uint16_t type = ntohs(header.type);
             const std::uint32_t size = ntohl(header.size);
+            if (type == p_projectile && size == sizeof(ProjectilePacket)) {
+                ProjectilePacket packet{};
+                if (!receiveData(socket, &packet, sizeof(packet))) break;
+                network::ProjectileEvent event{};
+                event.kind = ntohl(packet.kind); event.objectId = ntohl(packet.objectId);
+                memcpy(event.explosion, packet.explosion, sizeof(event.explosion)); event.explosion[4095] = '\0';
+                memcpy(event.path, packet.path, sizeof(event.path));
+                event.path[255] = '\0';
+                memcpy(event.flash, packet.flash, sizeof(event.flash));
+                event.flash[255] = '\0';
+                if (event.flash[0] && (strstr(event.flash, "..") != nullptr
+                    || (strncmp(event.flash, "data/", 5) != 0 && strncmp(event.flash, "mods/", 5) != 0))) event.flash[0] = '\0';
+                bool valid = event.kind <= 4 && (event.kind == 0 || (event.objectId != 0 && strcmp(event.path, "data/entities/projectiles/bomb.xml") == 0))
+                    && event.path[0] != '\0' && strstr(event.path, "..") == nullptr
+                    && (strncmp(event.path, "data/", 5) == 0 || strncmp(event.path, "mods/", 5) == 0);
+                for (int i = 0; i < 15; ++i) {
+                    event.values[i] = unpackFloat(packet.values[i]);
+                    valid = valid && std::isfinite(event.values[i]);
+                }
+                if (valid) {
+                    AcquireSRWLockExclusive(&p_projectileLock);
+                    if (p_incomingProjectiles.size() < 1024) p_incomingProjectiles.push_back(event);
+                    else monitor::write("error", "Incoming projectile queue full");
+                    ReleaseSRWLockExclusive(&p_projectileLock);
+                }
+                continue;
+            }
             if (type == p_player && size == sizeof(PlayerPacket)) {
                 PlayerPacket packet{};
                 if (!receiveData(socket, &packet, sizeof(packet))) {
@@ -796,4 +849,21 @@ bool network::getRemotePlayer(PlayerState& state, std::uint32_t& sequence) {
     }
     ReleaseSRWLockShared(&p_playerLock);
     return ready;
+}
+
+bool network::sendProjectile(const ProjectileEvent& event) {
+    if (status() != Status::connected) return false;
+    AcquireSRWLockExclusive(&p_projectileLock);
+    const bool accepted = p_outgoingProjectiles.size() < 1024;
+    if (accepted) p_outgoingProjectiles.push_back(event);
+    ReleaseSRWLockExclusive(&p_projectileLock);
+    return accepted;
+}
+
+bool network::takeProjectile(ProjectileEvent& event) {
+    AcquireSRWLockExclusive(&p_projectileLock);
+    const bool available = !p_incomingProjectiles.empty();
+    if (available) { event = p_incomingProjectiles.front(); p_incomingProjectiles.pop_front(); }
+    ReleaseSRWLockExclusive(&p_projectileLock);
+    return available;
 }

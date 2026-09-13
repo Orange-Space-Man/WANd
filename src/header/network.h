@@ -3,6 +3,15 @@
 #include <cstdint>
 
 namespace network {
+    struct ProjectileEvent {
+        std::uint32_t kind = 0, objectId = 0;
+        char explosion[4096]{};
+        char path[256];
+        char flash[256];
+        float values[15];
+    };
+    bool sendProjectile(const ProjectileEvent& event);
+    bool takeProjectile(ProjectileEvent& event);
     struct PlayerState {
         float x;
         float y;

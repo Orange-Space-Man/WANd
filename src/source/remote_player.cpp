@@ -49,6 +49,8 @@ namespace {
     DWORD p_lastPacket = 0;
     DWORD p_lastUpdate = 0;
     bool p_loggedHandHotspot = false;
+    bool p_tipValid = false;
+    float p_tipX = 0, p_tipY = 0;
 
     bool beginCall(lua51::lua_State* state, const char* name, int top) {
         lua51::getGlobal(state, name);
@@ -548,6 +550,7 @@ namespace {
     }
 
     void killWand(lua51::lua_State* state) {
+        p_tipValid = false;
         if (p_wandEntity == 0) {
             return;
         }
@@ -627,6 +630,9 @@ namespace {
         output.close();
         if (!output) { monitor::write("error", "Cannot write calculated wand sprite"); return {}; }
         monitor::write("log", generated.c_str());
+        p_tipX = grip.tipX + 1.0f - grip.x + handX;
+        p_tipY = grip.tipY - grip.y + handY;
+        p_tipValid = true;
         return generated;
     }
 
@@ -1080,6 +1086,7 @@ void remote_player::update(lua51::lua_State* state) {
 }
 
 void remote_player::forget(lua51::lua_State* state) {
+    p_tipValid = false;
     if (state != nullptr) {
         killRemote(state);
     } else {
@@ -1096,4 +1103,22 @@ void remote_player::forget(lua51::lua_State* state) {
         p_loggedHandHotspot = false;
     }
     resetMotion();
+}
+
+bool remote_player::wandTip(lua51::lua_State* state, float& x, float& y) {
+    if (!p_tipValid || !p_wandEntity) return false;
+    const int top = lua51::getTop(state);
+    if (!beginCall(state, "EntityGetTransform", top)) return false;
+    lua51::pushNumber(state, p_wandEntity);
+    if (lua51::pcall(state, 1, 5, 0) != 0) { lua51::setTop(state, top); return false; }
+    float pose[5];
+    for (int i = 0; i < 5; ++i) {
+        if (lua51::type(state, -5 + i) != lua51::typeNumber) { lua51::setTop(state, top); return false; }
+        pose[i] = static_cast<float>(lua51::toNumber(state, -5 + i));
+    }
+    lua51::setTop(state, top);
+    const float dx = p_tipX * pose[3], dy = p_tipY * pose[4];
+    x = pose[0] + std::cos(pose[2]) * dx - std::sin(pose[2]) * dy;
+    y = pose[1] + std::sin(pose[2]) * dx + std::cos(pose[2]) * dy;
+    return true;
 }

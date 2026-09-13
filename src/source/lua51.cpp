@@ -6,6 +6,8 @@
 #include "noita.h"
 #include "player_sync.h"
 #include "remote_player.h"
+#include "projectile_sync.h"
+#include "bomb_sync.h"
 
 #include <windows.h>
 
@@ -74,6 +76,8 @@ namespace {
             multiplayer_lua::forget(state);
             player_sync::forget(state);
             remote_player::forget(state);
+            projectile_sync::forget();
+            bomb_sync::forget(state);
             monitor::write("lua", "waiting");
             monitor::write("log", "Lua state closed");
         }
@@ -93,9 +97,11 @@ namespace {
         } scope(insideCall);
         saveState(state);
         multiplayer_lua::load(state);
+        bomb_sync::install(state);
         const int status = p_pcall(state, arguments, results, errorFunction);
         player_sync::update(state);
         remote_player::update(state);
+        projectile_sync::update(state);
         return status;
     }
 }

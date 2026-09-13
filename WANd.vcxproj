@@ -100,6 +100,8 @@
     <ClInclude Include="player_sync.h" />
     <ClInclude Include="remote_player.h" />
     <ClInclude Include="wand_image_grip.h" />
+    <ClInclude Include="projectile_sync.h" />
+    <ClInclude Include="bomb_sync.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="control.cpp" />
@@ -114,6 +116,8 @@
     <ClCompile Include="noita.cpp" />
     <ClCompile Include="player_sync.cpp" />
     <ClCompile Include="remote_player.cpp" />
+    <ClCompile Include="projectile_sync.cpp" />
+    <ClCompile Include="bomb_sync.cpp" />
   </ItemGroup>
   <ItemGroup>
     <None Include="WANd.def" />

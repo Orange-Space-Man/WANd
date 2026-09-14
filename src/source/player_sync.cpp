@@ -1,4 +1,5 @@
 #include "player_sync.h"
+#include "outfits.h"
 
 #include "monitor.h"
 #include "network.h"
@@ -441,6 +442,8 @@ void player_sync::update(lua51::lua_State* state) {
     }
 
     network::PlayerState playerState{};
+    outfits::refreshUnlocks(state);
+    playerState.outfit = outfits::appearance();
     playerState.x = x;
     playerState.y = y;
     playerState.velocityX = velocityX;
@@ -530,6 +533,7 @@ void player_sync::update(lua51::lua_State* state) {
         }
     }
     network::sendPlayer(playerState);
+    outfits::apply(state, player, playerState.outfit, false);
 
     char text[256]{};
     _snprintf_s(text, sizeof(text), _TRUNCATE, "%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%s", x, y, velocityX, velocityY, aimX, aimY, facing);
@@ -537,4 +541,5 @@ void player_sync::update(lua51::lua_State* state) {
 }
 
 void player_sync::forget(lua51::lua_State*) {
+    outfits::forget(false);
 }

@@ -3,6 +3,7 @@
 #include "memory.h"
 #include "monitor.h"
 #include "network.h"
+#include "multiplayer_menu.h"
 #include "noita.h"
 
 #include <windows.h>
@@ -24,6 +25,7 @@ namespace {
     void* volatile p_startOptions = nullptr;
     volatile LONG p_hostStart = FALSE;
     volatile LONG p_clientStart = FALSE;
+    volatile LONG p_requestedStart = FALSE;
     std::uint32_t p_seed = 0;
     DWORD p_startTime = 0;
 
@@ -53,6 +55,7 @@ namespace {
     }
 
     void startGame(void* gameMode, void* startOptions, std::uint32_t seed) {
+        multiplayer_menu::closeForRun();
         if (!setSeed(seed)) {
             monitor::write("log", "Could not set shared world seed");
         }
@@ -94,6 +97,7 @@ namespace {
 
     void __cdecl swapWindow(void* window) {
         game_start::update();
+        multiplayer_menu::draw();
         p_swapWindow(window);
     }
 }
@@ -149,6 +153,10 @@ void game_start::update() {
         return;
     }
 
+    if (InterlockedExchange(&p_requestedStart, FALSE) && network::isHost() && network::status() == network::Status::connected) {
+        startNewGame(nullptr, nullptr);
+    }
+
     std::uint32_t seed = 0;
     if (network::status() == network::Status::connected && !network::isHost() && network::takeRun(seed)) {
         p_seed = seed;
@@ -174,4 +182,10 @@ void game_start::update() {
     void* const gameMode = InterlockedExchangePointer(&p_gameMode, nullptr);
     void* const startOptions = InterlockedExchangePointer(&p_startOptions, nullptr);
     startGame(gameMode, startOptions, p_seed);
+}
+
+bool game_start::requestStart() {
+    if (!p_startNewGame || !network::isHost() || network::status() != network::Status::connected) return false;
+    InterlockedExchange(&p_requestedStart, TRUE);
+    return true;
 }

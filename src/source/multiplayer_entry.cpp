@@ -6,6 +6,7 @@
 #include "lua51.h"
 #include "monitor.h"
 #include "network.h"
+#include "multiplayer_menu.h"
 #include "noita.h"
 
 #include <windows.h>
@@ -18,6 +19,7 @@ namespace {
     DWORD WINAPI hookNoita(LPVOID) {
         if (noita::init()) {
             game_start::init();
+            if (!multiplayer_menu::init()) monitor::write("log", "Multiplayer menu hook unavailable for this build");
             game_pause::init();
             lua51::init();
         } else {
@@ -86,7 +88,7 @@ extern "C" void __cdecl WANdStop() {
     network::stop();
 }
 
-extern "C" int __cdecl WANdStatus() { 
+extern "C" int __cdecl WANdStatus() {
     return static_cast<int>(network::status());
 }
 

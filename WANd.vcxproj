@@ -88,6 +88,9 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="control.h" />
+    <ClInclude Include="multiplayer_menu.h" />
+    <ClInclude Include="outfits.h" />
+    <ClInclude Include="lan_discovery.h" />
     <ClInclude Include="game_pause.h" />
     <ClInclude Include="game_start.h" />
     <ClInclude Include="lua51.h" />
@@ -105,6 +108,9 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="control.cpp" />
+    <ClCompile Include="multiplayer_menu.cpp" />
+    <ClCompile Include="outfits.cpp" />
+    <ClCompile Include="lan_discovery.cpp" />
     <ClCompile Include="game_pause.cpp" />
     <ClCompile Include="game_start.cpp" />
     <ClCompile Include="lua51.cpp" />

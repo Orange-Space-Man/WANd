@@ -14,6 +14,7 @@
 #include <regex>
 #include <filesystem>
 #include "wand_image_grip.h"
+#include "outfits.h"
 
 namespace {
     constexpr DWORD p_updateTime = 16;
@@ -75,6 +76,7 @@ namespace {
     }
 
     void killRemote(lua51::lua_State* state) {
+        outfits::forget(true);
         if (p_entity == 0 && p_arm == 0 && p_wandEntity == 0) {
             return;
         }
@@ -496,6 +498,10 @@ namespace {
   <SpriteComponent _tags="character" image_file="data/enemies_gfx/player.xml" rect_animation="stand" offset_x="6" offset_y="14" z_index="0.6" />
   <HotspotComponent _tags="hand" sprite_hotspot_name="hand" transform_with_scale="1" />
   <HotspotComponent _tags="right_arm_root" sprite_hotspot_name="right_arm_start" transform_with_scale="1" />
+  <HotspotComponent _tags="cape_root" sprite_hotspot_name="cape" />
+  <Entity name="cape">
+    <Base file="data/entities/verlet_chains/cape/cape.xml" />
+  </Entity>
   <Entity name="arm_r" tags="player_arm_r">
     <SpriteComponent _tags="wand_remote_arm" image_file="data/enemies_gfx/player_arm.xml" rect_animation="default" z_index="0.59" />
     <InheritTransformComponent parent_hotspot_tag="right_arm_root" only_position="1" />
@@ -1048,6 +1054,7 @@ void remote_player::update(lua51::lua_State* state) {
         p_loggedHandHotspot = false;
     }
     if (p_entity == 0) {
+        outfits::forget(true);
         p_entity = createDefinedEntity(state, player);
         if (p_entity == 0 || p_sprite == 0) {
             killRemote(state);
@@ -1079,13 +1086,16 @@ void remote_player::update(lua51::lua_State* state) {
     }
 
     setPosition(state, p_entity, p_x, p_y, player.facingLeft);
+    outfits::apply(state, p_entity, player.outfit, true);
     setAnimation(state, player.animation[0] != '\0' ? player.animation : "stand");
+    outfits::animate(state, p_entity, player.animation[0] != '\0' ? player.animation : "stand");
     createWand(state, player);
     applyHeldPose(state, player);
     logAttachment(state);
 }
 
 void remote_player::forget(lua51::lua_State* state) {
+    outfits::forget(true);
     p_tipValid = false;
     if (state != nullptr) {
         killRemote(state);

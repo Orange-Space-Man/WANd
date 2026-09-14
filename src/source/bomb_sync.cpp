@@ -34,7 +34,10 @@ namespace {
         return true;
     }
     void transform(lua51::lua_State* s, int id, const network::ProjectileEvent& event) {
-        Stack stack(s);
+        Stack stack(s); lua51::getGlobal(s, "EntitySetTransform"); lua51::pushNumber(s, id);
+        for (int i = 0; i < 5; ++i) lua51::pushNumber(s, event.values[i]);
+        lua51::pcall(s, 6, 0, 0);
+        lua51::setTop(s, stack.top);
         lua51::getGlobal(s, "EntityGetFirstComponentIncludingDisabled"); lua51::pushNumber(s, id); lua51::pushString(s, "PhysicsBodyComponent");
         if (lua51::pcall(s, 2, 1, 0) != 0 || lua51::type(s, -1) != lua51::typeNumber) return;
         const int body = static_cast<int>(lua51::toNumber(s, -1)); lua51::setTop(s, stack.top);

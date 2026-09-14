@@ -13,7 +13,7 @@
 
 namespace {
     constexpr std::uint32_t p_magic = 0x57414E44;
-    constexpr std::uint16_t p_version = 31;
+    constexpr std::uint16_t p_version = 33;
     constexpr std::uint16_t p_projectile = 6;
     struct ProjectilePacket { std::uint32_t kind, objectId; char explosion[4096]; char path[256]; char flash[256]; std::uint32_t values[15]; };
     SRWLOCK p_projectileLock = SRWLOCK_INIT;
@@ -70,6 +70,7 @@ namespace {
         std::uint32_t wandRotation;
         std::uint32_t wandScaleX;
         std::uint32_t wandScaleY;
+        std::uint32_t outfit;
     };
 
     struct RunPacket {
@@ -310,6 +311,7 @@ namespace {
         packet.wandRotation = packFloat(state.wandRotation);
         packet.wandScaleX = packFloat(state.wandScaleX);
         packet.wandScaleY = packFloat(state.wandScaleY);
+        packet.outfit = htonl(state.outfit);
         bool sent = false;
         AcquireSRWLockExclusive(&p_sendLock);
         if (sendData(socket, &header, sizeof(header))) {
@@ -402,6 +404,7 @@ namespace {
         state.wandRotation = unpackFloat(packet.wandRotation);
         state.wandScaleX = unpackFloat(packet.wandScaleX);
         state.wandScaleY = unpackFloat(packet.wandScaleY);
+        state.outfit = ntohl(packet.outfit);
 
         AcquireSRWLockExclusive(&p_playerLock);
         p_remotePlayer = state;

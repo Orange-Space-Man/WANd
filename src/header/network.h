@@ -40,6 +40,7 @@ namespace network {
         float wandRotation;
         float wandScaleX;
         float wandScaleY;
+        std::uint32_t outfit;
     };
 
     enum class Status : long {
